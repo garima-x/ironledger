@@ -1,0 +1,281 @@
+"""
+IronLedger - Supabase Database Layer
+Handles persistent storage of ICS events, blockchain blocks, and forensic cases.
+
+Tables required (run schema.sql in Supabase SQL Editor):
+  - ics_events         : off-chain ICS command log (the "mutable" DB that can be tampered)
+  - blockchain_blocks  : mirror of the immutable ledger anchor blocks
+  - forensic_cases     : saved forensic reconstruction results
+
+Graceful degradation: if SUPABASE_URL / SUPABASE_KEY are not set the class
+operates in no-op mode and the app falls back to pure in-memory behaviour.
+"""
+
+import os
+import json
+import time
+import logging
+from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger("ironledger.db")
+
+# Load .env if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv optional
+
+# ── Try importing supabase ────────────────────────────────────────────────────
+try:
+    from supabase import create_client, Client
+    _SUPABASE_AVAILABLE = True
+except ImportError:
+    _SUPABASE_AVAILABLE = False
+    logger.warning("supabase-py not installed — running in memory-only mode.")
+
+
+class SupabaseDatabase:
+    """
+    Thin wrapper around the Supabase Python client for IronLedger persistence.
+    All methods are safe to call even when no credentials are configured; they
+    will log a warning and return gracefully (empty list / None).
+    """
+
+    def __init__(self):
+        self._client: Optional[Any] = None
+        self._enabled = False
+        self._connect()
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def _connect(self):
+        url = os.getenv("SUPABASE_URL", "").strip()
+        key = os.getenv("SUPABASE_KEY", "").strip()
+
+        if not url or not key or "your-project" in url:
+            logger.warning(
+                "SUPABASE_URL / SUPABASE_KEY not configured — "
+                "running in memory-only mode. Copy .env.example → .env and fill in your credentials."
+            )
+            return
+
+        if not _SUPABASE_AVAILABLE:
+            logger.warning("supabase package not available — running in memory-only mode.")
+            return
+
+        try:
+            self._client: Client = create_client(url, key)
+            self._enabled = True
+            logger.info(f"✅ Supabase connected: {url}")
+        except Exception as exc:
+            logger.error(f"Supabase connection failed: {exc} — falling back to memory-only mode.")
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    # ── ICS Events ────────────────────────────────────────────────────────────
+
+    def upsert_event(self, event: Dict[str, Any]) -> bool:
+        """
+        Persist a single ICS command event to the `ics_events` table.
+        Serialises the nested `parameters` and `plant_state_snapshot` dicts to JSON strings
+        so they fit cleanly in Postgres columns.
+        """
+        if not self._enabled:
+            return False
+        try:
+            row = {
+                "event_id":            event.get("event_id"),
+                "timestamp":           event.get("timestamp"),
+                "source":              event.get("source", "UNKNOWN"),
+                "command_type":        event.get("command_type", "UNKNOWN"),
+                "entity_id":           event.get("entity_id", "UNKNOWN"),
+                "parameters":          json.dumps(event.get("parameters", {})),
+                "plant_state_snapshot": json.dumps(event.get("plant_state_snapshot", {})),
+            }
+            self._client.table("ics_events").upsert(row, on_conflict="event_id").execute()
+            return True
+        except Exception as exc:
+            logger.error(f"upsert_event failed: {exc}")
+            return False
+
+    def load_events(self) -> List[Dict[str, Any]]:
+        """
+        Restore the full ICS event log from Supabase (used on server startup).
+        Returns a list ready to replace / seed simulator.event_log.
+        """
+        if not self._enabled:
+            return []
+        try:
+            resp = self._client.table("ics_events").select("*").order("event_id").execute()
+            events = []
+            for row in resp.data:
+                events.append({
+                    "event_id":             row["event_id"],
+                    "timestamp":            row["timestamp"],
+                    "source":               row["source"],
+                    "command_type":         row["command_type"],
+                    "entity_id":            row["entity_id"],
+                    "parameters":           json.loads(row.get("parameters") or "{}"),
+                    "plant_state_snapshot": json.loads(row.get("plant_state_snapshot") or "{}"),
+                })
+            logger.info(f"Loaded {len(events)} ICS events from Supabase.")
+            return events
+        except Exception as exc:
+            logger.error(f"load_events failed: {exc}")
+            return []
+
+    def delete_event(self, event_id: int) -> bool:
+        """Delete a single ICS event (used in log-tamper simulation)."""
+        if not self._enabled:
+            return False
+        try:
+            self._client.table("ics_events").delete().eq("event_id", event_id).execute()
+            return True
+        except Exception as exc:
+            logger.error(f"delete_event failed: {exc}")
+            return False
+
+    def tamper_event_field(self, event_id: int, field: str, value: Any) -> bool:
+        """
+        Directly patches a single field in the `ics_events` row — simulates
+        an attacker altering the off-chain database to hide malicious activity.
+        Only `source`, `command_type`, `entity_id`, and `parameters` are patchable.
+        """
+        if not self._enabled:
+            return False
+        ALLOWED = {"source", "command_type", "entity_id", "parameters"}
+        if field not in ALLOWED:
+            logger.warning(f"tamper_event_field: field '{field}' not patchable.")
+            return False
+        try:
+            patch_value = json.dumps(value) if field == "parameters" else value
+            self._client.table("ics_events").update({field: patch_value}).eq("event_id", event_id).execute()
+            return True
+        except Exception as exc:
+            logger.error(f"tamper_event_field failed: {exc}")
+            return False
+
+    # ── Blockchain Blocks ─────────────────────────────────────────────────────
+
+    def upsert_block(self, block: Dict[str, Any]) -> bool:
+        """Persist a blockchain anchor block to `blockchain_blocks`."""
+        if not self._enabled:
+            return False
+        try:
+            row = {
+                "block_index":    block.get("block_index"),
+                "event_id":       block.get("event_id"),
+                "event_hash":     block.get("event_hash"),
+                "previous_hash":  block.get("previous_hash"),
+                "timestamp":      block.get("timestamp"),
+                "source":         block.get("source", "UNKNOWN"),
+                "command_type":   block.get("command_type", "UNKNOWN"),
+                "entity_id":      block.get("entity_id", "UNKNOWN"),
+                "tx_hash":        block.get("tx_hash"),
+                "block_number":   block.get("block_number"),
+                "recorded_by":    block.get("recorded_by"),
+                "status":         block.get("status", "CONFIRMED_ON_CHAIN"),
+                "etherscan_url":  block.get("etherscan_url"),
+            }
+            self._client.table("blockchain_blocks").upsert(row, on_conflict="block_index").execute()
+            return True
+        except Exception as exc:
+            logger.error(f"upsert_block failed: {exc}")
+            return False
+
+    def load_blocks(self) -> List[Dict[str, Any]]:
+        """Restore blockchain blocks from Supabase."""
+        if not self._enabled:
+            return []
+        try:
+            resp = self._client.table("blockchain_blocks").select("*").order("block_index").execute()
+            return resp.data or []
+        except Exception as exc:
+            logger.error(f"load_blocks failed: {exc}")
+            return []
+
+    # ── Forensic Cases ────────────────────────────────────────────────────────
+
+    def save_case(
+        self,
+        case_name: str,
+        attack_scenario: Optional[str],
+        reconstruction: Dict[str, Any],
+        threat_intel: Dict[str, Any],
+        telemetry_snapshot: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Persists a completed forensic reconstruction as a named investigation case.
+        Returns the inserted row (including auto-generated id) or None on failure.
+        """
+        if not self._enabled:
+            return None
+        try:
+            root = reconstruction.get("root_cause_artifact", {})
+            row = {
+                "case_name":           case_name,
+                "attack_scenario":     attack_scenario or "UNKNOWN",
+                "created_at":          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "events_analyzed":     reconstruction.get("events_analyzed", 0),
+                "tamper_detected":     reconstruction.get("tamper_detected", False),
+                "tampered_records":    reconstruction.get("tampered_records_count", 0),
+                "root_cause_source":   root.get("source_identity", "Unknown"),
+                "root_cause_command":  root.get("entry_command", "Unknown"),
+                "root_cause_entity":   root.get("target_entity", "Unknown"),
+                "forensic_conclusion": root.get("forensic_conclusion", ""),
+                "attribution_actor":   threat_intel.get("attribution", {}).get("primary_actor", "Unknown"),
+                "confidence_score":    threat_intel.get("attribution", {}).get("confidence_score", 0),
+                "mitre_techniques":    json.dumps(threat_intel.get("matched_techniques", [])),
+                "timeline":            json.dumps(reconstruction.get("timeline", [])),
+                "threat_intel":        json.dumps(threat_intel),
+                "telemetry_snapshot":  json.dumps(telemetry_snapshot),
+            }
+            resp = self._client.table("forensic_cases").insert(row).execute()
+            saved = resp.data[0] if resp.data else row
+            logger.info(f"Forensic case saved: '{case_name}' (id={saved.get('id', '?')})")
+            return saved
+        except Exception as exc:
+            logger.error(f"save_case failed: {exc}")
+            return None
+
+    def get_all_cases(self) -> List[Dict[str, Any]]:
+        """Returns all forensic cases, newest first."""
+        if not self._enabled:
+            return []
+        try:
+            resp = (
+                self._client.table("forensic_cases")
+                .select(
+                    "id, case_name, attack_scenario, created_at, events_analyzed, "
+                    "tamper_detected, tampered_records, root_cause_source, root_cause_command, "
+                    "root_cause_entity, forensic_conclusion, attribution_actor, "
+                    "confidence_score, mitre_techniques"
+                )
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return resp.data or []
+        except Exception as exc:
+            logger.error(f"get_all_cases failed: {exc}")
+            return []
+
+    def get_case(self, case_id: int) -> Optional[Dict[str, Any]]:
+        """Returns a single forensic case by its auto-generated id (full detail)."""
+        if not self._enabled:
+            return None
+        try:
+            resp = self._client.table("forensic_cases").select("*").eq("id", case_id).execute()
+            if resp.data:
+                row = resp.data[0]
+                # Deserialise JSON columns
+                for col in ("timeline", "threat_intel", "telemetry_snapshot", "mitre_techniques"):
+                    if isinstance(row.get(col), str):
+                        row[col] = json.loads(row[col])
+                return row
+            return None
+        except Exception as exc:
+            logger.error(f"get_case({case_id}) failed: {exc}")
+            return None

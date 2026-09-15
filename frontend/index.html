@@ -32,6 +32,10 @@
                 <span class="pulse-dot"></span>
                 <span>Ethereum Sepolia Testnet</span>
             </div>
+            <div id="db-status-badge" class="db-status-badge offline" title="Supabase database connection status">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+                <span id="db-status-text">DB: Checking…</span>
+            </div>
             <a href="https://sepolia.etherscan.io/address/0x7a36B3DeE1F03287cCE488f2604245F11dF9d78F" target="_blank" class="contract-pill" title="View Smart Contract on Sepolia Etherscan">
                 <span class="label">Contract:</span>
                 <span class="addr">0x7a36...d78F</span>
@@ -374,9 +378,15 @@
             <div class="panel-header">
                 <div class="panel-title">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                    <span>Forensic Reconstruction & Threat Attribution</span>
+                    <span>Forensic Reconstruction &amp; Threat Attribution</span>
                 </div>
-                <button class="btn-reconstruct" onclick="runForensicReconstruction()">Run Backward-Walk</button>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button class="btn-reconstruct" onclick="runForensicReconstruction()">Run Backward-Walk</button>
+                    <button class="btn-save-case" onclick="openSaveCaseModal()" title="Save this reconstruction as a named forensic case in Supabase">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                        Save Case
+                    </button>
+                </div>
             </div>
 
             <div class="forensics-content">
@@ -402,6 +412,36 @@
         </section>
     </main>
 
+    <!-- ── Forensic Cases Database Browser ─────────────────────── -->
+    <section class="cases-section" id="cases-section">
+        <div class="cases-header">
+            <div class="cases-title-group">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+                <div>
+                    <h2 class="cases-title">Forensic Case Database</h2>
+                    <p class="cases-subtitle">Persistent investigation records anchored to Supabase — every reconstruction saved for permanent chain-of-custody.</p>
+                </div>
+            </div>
+            <div class="cases-header-actions">
+                <span id="cases-db-indicator" class="cases-db-indicator">⚪ DB Offline</span>
+                <button class="cases-refresh-btn" onclick="loadCases()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                    Refresh
+                </button>
+            </div>
+        </div>
+
+        <!-- Cases grid -->
+        <div class="cases-grid" id="cases-grid">
+            <div class="cases-empty" id="cases-empty">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+                <p>No forensic cases saved yet.</p>
+                <p class="cases-empty-hint">Run <strong>Act 4 → Backward-Walk</strong> then click <strong>Save Case</strong> to create your first case record.</p>
+                <p class="cases-empty-hint" id="cases-db-hint"></p>
+            </div>
+        </div>
+    </section>
+
     <!-- Modal for Detailed Forensic Report -->
     <div id="report-modal" class="modal-overlay hidden">
         <div class="modal-container">
@@ -417,6 +457,47 @@
             </div>
             <div class="modal-body">
                 <iframe id="report-iframe" src="about:blank"></iframe>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Save Forensic Case -->
+    <div id="save-case-modal" class="modal-overlay hidden">
+        <div class="modal-container save-case-modal-container">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                    <span>Save Forensic Case to Database</span>
+                </div>
+                <button class="modal-close-btn" onclick="closeSaveCaseModal()">&times;</button>
+            </div>
+            <div class="modal-body save-case-body">
+                <label class="save-case-label" for="case-name-input">Case Name <span style="opacity:0.5;font-size:11px">(leave blank to auto-generate)</span></label>
+                <input id="case-name-input" class="save-case-input" type="text" placeholder="e.g. TRITON-HatMan-Incident-2026" />
+                <div id="save-case-result" class="save-case-result hidden"></div>
+                <div class="save-case-actions">
+                    <button class="btn-cancel" onclick="closeSaveCaseModal()">Cancel</button>
+                    <button class="btn-confirm-save" id="btn-confirm-save" onclick="confirmSaveCase()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                        Save to Supabase
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: View Forensic Case Detail -->
+    <div id="case-detail-modal" class="modal-overlay hidden">
+        <div class="modal-container case-detail-modal-container">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <span id="case-detail-title">Case Detail</span>
+                </div>
+                <button class="modal-close-btn" onclick="closeCaseDetailModal()">&times;</button>
+            </div>
+            <div class="modal-body case-detail-body" id="case-detail-body">
+                <!-- Populated dynamically -->
             </div>
         </div>
     </div>

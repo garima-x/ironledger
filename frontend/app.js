@@ -16,6 +16,8 @@ let state = {
 document.addEventListener("DOMContentLoaded", () => {
     startTelemetryPolling();
     fetchBlockchainBlocks();
+    checkDbStatus();
+    loadCases();
 });
 
 // Telemetry Polling Loop
@@ -35,6 +37,7 @@ async function updateDashboard() {
         renderInstrumentGauges(data.telemetry);
         renderAnomalyEngine(data.anomaly);
         renderRecentBlocks(data.recent_blocks);
+        updateDbStatusBadge(data.db_connected);
     } catch (err) {
         console.warn("Telemetry polling error:", err);
     }
@@ -438,4 +441,277 @@ function toggleMetaMask() {
     } else {
         btnText.textContent = "Connect MetaMask";
     }
+}
+
+// ── Supabase DB Status ────────────────────────────────────────────────────────
+
+async function checkDbStatus() {
+    const badge  = document.getElementById("db-status-badge");
+    const text   = document.getElementById("db-status-text");
+    if (!badge) return;
+    badge.className = "db-status-badge checking";
+    text.textContent = "DB: Connecting…";
+    try {
+        const res  = await fetch("/api/db/status");
+        const data = await res.json();
+        updateDbStatusBadge(data.connected);
+    } catch {
+        badge.className = "db-status-badge offline";
+        text.textContent = "DB: Unreachable";
+    }
+}
+
+function updateDbStatusBadge(connected) {
+    const badge   = document.getElementById("db-status-badge");
+    const text    = document.getElementById("db-status-text");
+    const indic   = document.getElementById("cases-db-indicator");
+    const hint    = document.getElementById("cases-db-hint");
+    if (!badge) return;
+    if (connected) {
+        badge.className = "db-status-badge online";
+        text.textContent = "Supabase: Connected";
+        if (indic) { indic.textContent = "🟢 Supabase Online"; indic.className = "cases-db-indicator online"; }
+        if (hint) hint.textContent = "";
+    } else {
+        badge.className = "db-status-badge offline";
+        text.textContent = "DB: Offline (memory mode)";
+        if (indic) { indic.textContent = "⚪ DB Offline"; indic.className = "cases-db-indicator"; }
+        if (hint) hint.innerHTML = `<span style="color:#f59e0b">ℹ️ To enable persistence: copy <code>.env.example</code> → <code>.env</code> and add your Supabase URL + key, then restart the server.</span>`;
+    }
+}
+
+// ── Forensic Cases List ───────────────────────────────────────────────────────
+
+async function loadCases() {
+    const grid  = document.getElementById("cases-grid");
+    const empty = document.getElementById("cases-empty");
+    if (!grid) return;
+    try {
+        const res  = await fetch("/api/cases");
+        const data = await res.json();
+        // Update DB indicator from cases response
+        updateDbStatusBadge(data.db_connected);
+
+        // Remove old case cards (keep empty state)
+        Array.from(grid.querySelectorAll(".case-card")).forEach(el => el.remove());
+
+        if (!data.cases || data.cases.length === 0) {
+            if (empty) empty.style.display = "flex";
+            return;
+        }
+        if (empty) empty.style.display = "none";
+
+        data.cases.forEach(c => {
+            const card = buildCaseCard(c);
+            grid.appendChild(card);
+        });
+    } catch (err) {
+        console.warn("loadCases error:", err);
+    }
+}
+
+function buildCaseCard(c) {
+    const card = document.createElement("div");
+    card.className = "case-card" + (c.tamper_detected ? " tampered" : "");
+    card.onclick   = () => openCaseDetail(c.id);
+
+    const ts = c.created_at ? new Date(c.created_at).toLocaleString() : "--";
+    const mitreTags = parseMitreTags(c.mitre_techniques);
+    const mitreHtml = mitreTags.slice(0,3).map(t => `<span class="case-mitre-tag">${esc(t)}</span>`).join("");
+
+    card.innerHTML = `
+        <div class="case-card-top">
+            <div class="case-card-name">${esc(c.case_name || "Untitled Case")}</div>
+            <div class="case-card-scenario">${esc(c.attack_scenario || "—")}</div>
+        </div>
+        <div class="case-card-meta">
+            <span class="case-card-meta-item">🕐 ${esc(ts)}</span>
+            <span class="case-card-meta-item">📊 <strong>${c.events_analyzed || 0}</strong> events</span>
+        </div>
+        <div class="case-card-attribution">🎯 ${esc(c.attribution_actor || "Unknown")}</div>
+        <div class="case-card-conclusion">${esc(c.forensic_conclusion || "No conclusion recorded.")}</div>
+        ${c.tamper_detected ? `<div class="case-tamper-flag">⚠️ TAMPER DETECTED</div>` : ""}
+        ${mitreHtml ? `<div class="case-mitre-tags" style="margin-top:10px">${mitreHtml}</div>` : ""}
+        <div class="case-card-confidence">${Math.round((c.confidence_score || 0) * 100)}%</div>
+    `;
+    return card;
+}
+
+function parseMitreTags(raw) {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw.map(t => t.technique_id || t.id || t.name || String(t));
+    try {
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr.map(t => t.technique_id || t.id || t.name || String(t)) : [];
+    } catch { return []; }
+}
+
+// ── Save Case Modal ───────────────────────────────────────────────────────────
+
+function openSaveCaseModal() {
+    document.getElementById("case-name-input").value = "";
+    const res = document.getElementById("save-case-result");
+    res.className = "save-case-result hidden";
+    res.textContent = "";
+    const btn = document.getElementById("btn-confirm-save");
+    btn.disabled = false;
+    document.getElementById("save-case-modal").classList.remove("hidden");
+    setTimeout(() => document.getElementById("case-name-input").focus(), 80);
+}
+
+function closeSaveCaseModal() {
+    document.getElementById("save-case-modal").classList.add("hidden");
+}
+
+async function confirmSaveCase() {
+    const btn      = document.getElementById("btn-confirm-save");
+    const inputEl  = document.getElementById("case-name-input");
+    const result   = document.getElementById("save-case-result");
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    result.className = "save-case-result hidden";
+
+    try {
+        const res = await fetch("/api/cases/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ case_name: inputEl.value.trim() || null })
+        });
+        const data = await res.json();
+
+        result.className = "save-case-result " + (data.status === "CASE_SAVED" ? "success" : "error");
+        if (data.status === "CASE_SAVED") {
+            const cn = data.case?.case_name || "Case";
+            result.textContent = `✅ Case "${cn}" saved to Supabase! Refreshing case list…`;
+            setTimeout(() => { closeSaveCaseModal(); loadCases(); }, 1500);
+        } else {
+            result.innerHTML = `⚠️ ${data.note || "Case not persisted — Supabase may be offline."}
+<br><br>Reconstruction summary:<br>
+• Events analyzed: ${data.reconstruction_summary?.events_analyzed ?? "—"}<br>
+• Tamper detected: ${data.reconstruction_summary?.tamper_detected ?? "—"}<br>
+• Root cause: ${data.reconstruction_summary?.root_cause?.source_identity ?? "—"}`;
+        }
+    } catch (err) {
+        result.className = "save-case-result error";
+        result.textContent = `❌ Save failed: ${err.message}`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg> Save to Supabase`;
+    }
+}
+
+// ── Case Detail Modal ─────────────────────────────────────────────────────────
+
+async function openCaseDetail(caseId) {
+    document.getElementById("case-detail-title").textContent = "Loading…";
+    document.getElementById("case-detail-body").innerHTML = `<div style="padding:40px;text-align:center;color:#64748b">Loading case data…</div>`;
+    document.getElementById("case-detail-modal").classList.remove("hidden");
+
+    try {
+        const res  = await fetch(`/api/cases/${caseId}`);
+        if (!res.ok) throw new Error("Not found");
+        const c    = await res.json();
+        renderCaseDetail(c);
+    } catch (err) {
+        document.getElementById("case-detail-body").innerHTML =
+            `<div style="padding:40px;text-align:center;color:#ef4444">Failed to load case: ${err.message}</div>`;
+    }
+}
+
+function closeCaseDetailModal() {
+    document.getElementById("case-detail-modal").classList.add("hidden");
+}
+
+function renderCaseDetail(c) {
+    document.getElementById("case-detail-title").textContent = c.case_name || "Case Detail";
+    const body   = document.getElementById("case-detail-body");
+    const ts     = c.created_at ? new Date(c.created_at).toLocaleString() : "--";
+    const mitreTags = parseMitreTags(c.mitre_techniques);
+    const timeline  = Array.isArray(c.timeline) ? c.timeline :
+                      (typeof c.timeline === "string" ? JSON.parse(c.timeline || "[]") : []);
+    const intel     = (typeof c.threat_intel === "object" ? c.threat_intel :
+                      JSON.parse(c.threat_intel || "{}"));
+
+    body.innerHTML = `
+        <!-- Overview -->
+        <div class="case-detail-section">
+            <div class="case-detail-section-title">📋 Case Overview</div>
+            <div class="case-detail-kv">
+                <span class="case-detail-key">Case ID</span>
+                <span class="case-detail-val">#${c.id}</span>
+                <span class="case-detail-key">Scenario</span>
+                <span class="case-detail-val">${esc(c.attack_scenario || "—")}</span>
+                <span class="case-detail-key">Saved At</span>
+                <span class="case-detail-val">${esc(ts)}</span>
+                <span class="case-detail-key">Events Analyzed</span>
+                <span class="case-detail-val">${c.events_analyzed ?? "—"}</span>
+                <span class="case-detail-key">Tamper Detected</span>
+                <span class="case-detail-val" style="color:${c.tamper_detected ? '#ef4444' : '#10b981'}">
+                    ${c.tamper_detected ? `⚠️ YES — ${c.tampered_records} tampered record(s)` : '✅ NO — All blocks verified'}
+                </span>
+            </div>
+        </div>
+
+        <!-- Attribution -->
+        <div class="case-detail-section">
+            <div class="case-detail-section-title">🎯 Attribution & MITRE ATT&CK</div>
+            <div class="case-detail-kv">
+                <span class="case-detail-key">Attributed Actor</span>
+                <span class="case-detail-val" style="color:#f59e0b;font-weight:700">${esc(c.attribution_actor || "Unknown")}</span>
+                <span class="case-detail-key">Confidence</span>
+                <span class="case-detail-val">${Math.round((c.confidence_score || 0) * 100)}%</span>
+                <span class="case-detail-key">MITRE Techniques</span>
+                <span class="case-detail-val">
+                    <div class="case-mitre-tags">
+                        ${mitreTags.map(t => `<span class="case-mitre-tag">${esc(String(t))}</span>`).join("") || "—"}
+                    </div>
+                </span>
+            </div>
+        </div>
+
+        <!-- Root Cause -->
+        <div class="case-detail-section">
+            <div class="case-detail-section-title">🔍 Root Cause Artifact</div>
+            <div class="case-detail-kv">
+                <span class="case-detail-key">Source Identity</span>
+                <span class="case-detail-val" style="color:#ef4444">${esc(c.root_cause_source || "—")}</span>
+                <span class="case-detail-key">Entry Command</span>
+                <span class="case-detail-val">${esc(c.root_cause_command || "—")}</span>
+                <span class="case-detail-key">Target Entity</span>
+                <span class="case-detail-val">${esc(c.root_cause_entity || "—")}</span>
+                <span class="case-detail-key">Forensic Conclusion</span>
+                <span class="case-detail-val" style="line-height:1.6">${esc(c.forensic_conclusion || "—")}</span>
+            </div>
+        </div>
+
+        <!-- Timeline -->
+        <div class="case-detail-section">
+            <div class="case-detail-section-title">📅 Reconstructed Event Timeline (${timeline.length} steps)</div>
+            ${timeline.length === 0 ? `<div style="color:#64748b;font-size:12px">No timeline data recorded.</div>` : 
+                timeline.map((step, i) => {
+                    const isMalicious = (step.kill_chain_phase || "").toLowerCase().includes("malicious") ||
+                                        (step.kill_chain_phase || "").toLowerCase().includes("neutraliz");
+                    return `
+                    <div class="case-timeline-step">
+                        <div class="step-num ${step.tampered ? 'tampered' : ''}">${step.step_order ?? i+1}</div>
+                        <div class="step-info">
+                            <div class="step-cmd">${esc(step.command_type || "—")} → ${esc(step.entity_id || "—")}</div>
+                            <div class="step-meta">${esc(step.formatted_time || "")} &nbsp;|&nbsp; Source: ${esc(step.source || "—")}</div>
+                            <div class="step-phase ${isMalicious ? 'malicious' : ''}">${esc(step.kill_chain_phase || "—")}</div>
+                            ${step.tampered ? `<div style="font-size:10px;color:#ef4444;margin-top:4px">⚠️ ${esc(step.tamper_note || 'TAMPER DETECTED')}</div>` : ""}
+                        </div>
+                    </div>`;
+                }).join("")
+            }
+        </div>
+    `;
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+function esc(str) {
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
 }
