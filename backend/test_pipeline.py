@@ -1,98 +1,244 @@
-"""
-IronLedger - Automated Pipeline & Verification Test Suite
-Verifies SCADA physics, ML anomaly detector, blockchain hashing, tamper-detection,
-backward-walk forensic reconstruction, and MITRE ATT&CK attribution.
-"""
-
-import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import sys
+import time
+import copy
 
-from backend.simulator import ICSSimulator
+try:
+    import pytest
+except ImportError:
+    pytest = None
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from backend.blockchain import BlockchainLedger
+from backend.simulator import ICSSimulator
 from backend.anomaly_detector import AnomalyDetector
 from backend.forensics import ForensicReconstructionEngine
 from backend.threat_intel import ThreatIntelligenceEngine
-from backend.report_generator import ForensicReportGenerator
 
-def test_full_pipeline():
-    print("========================================")
-    print("Testing IronLedger End-to-End Pipeline...")
-    print("========================================")
 
-    # 1. Test Simulator
+pytest_fixture = pytest.fixture if pytest else (lambda fn: fn)
+
+@pytest_fixture
+def ledger():
+    return BlockchainLedger()
+
+
+@pytest_fixture
+def simulator():
     sim = ICSSimulator()
-    t0 = sim.get_telemetry_snapshot()
-    assert t0["pump_a"]["rpm"] == 2400.0, "Initial pump RPM incorrect"
-    assert t0["sis"]["armed"] == True, "SIS must be armed initially"
-    print(" [✓] Simulator initialized nominal state")
+    sim.reset_state()
+    return sim
 
-    # 2. Test Anomaly Detector on Baseline
-    detector = AnomalyDetector()
-    eval_norm = detector.evaluate_telemetry(t0)
-    assert not eval_norm["is_anomaly"], f"Baseline flagged false positive: {eval_norm}"
-    print(f" [✓] Baseline anomaly detection passed (ML score: {eval_norm['ml_anomaly_score']})")
 
-    # 3. Test Blockchain Ledger & Anchoring
-    ledger = BlockchainLedger()
-    cmd1 = sim.execute_command("AUTHORIZED_ENG_01", "START", "PUMP_A_01", {"rpm": 2400.0})
-    b1 = ledger.anchor_event(cmd1)
-    assert b1["event_hash"].startswith("0x"), "Invalid event hash format"
-    assert len(ledger.chain) == 2, "Ledger must contain genesis + 1 block"
-    print(f" [✓] Event anchored onto blockchain: {b1['event_hash'][:16]}... (Block #{b1['block_number']})")
+@pytest_fixture
+def anomaly_detector():
+    return AnomalyDetector()
 
-    # 4. Test Attack Injection & Anomaly Detection
-    sim.inject_attack("triton")
-    # Simulate a few physics ticks
-    for _ in range(5):
-        sim.update_physics(dt=1.0)
-    t_attack = sim.get_telemetry_snapshot()
-    eval_attack = detector.evaluate_telemetry(t_attack)
-    assert eval_attack["is_anomaly"], "Anomaly detector failed to trigger during attack!"
-    assert eval_attack["severity"] in ["CRITICAL", "CATASTROPHIC", "WARNING"], "Unexpected severity"
-    print(f" [✓] Triton attack detected: Severity {eval_attack['severity']} (Violations: {len(eval_attack['rule_violations'])})")
 
-    # Anchor attack commands
-    cmd_attack = sim.execute_command("ROGUE_OPERATOR_0x7b", "OVERRIDE_SIS", "SIS_INTERLOCK_01", {"bypass": True})
-    ledger.anchor_event(cmd_attack)
+def test_canonical_hashing_determinism(ledger):
+    """Verifies that hashing is strictly deterministic regardless of dictionary key ordering."""
+    event_a = {
+        "event_id": 1,
+        "timestamp": 1700000000.1234,
+        "source": "AUTHORIZED_ENG_01",
+        "command_type": "START",
+        "entity_id": "PUMP_A_01",
+        "parameters": {"rpm": 2400.0, "mode": "AUTO"},
+        "plant_state_snapshot": {"pressure": 5.4, "temp": 68.5}
+    }
+    event_b = {
+        "plant_state_snapshot": {"temp": 68.5, "pressure": 5.4},
+        "parameters": {"mode": "AUTO", "rpm": 2400.0},
+        "entity_id": "PUMP_A_01",
+        "command_type": "START",
+        "source": "AUTHORIZED_ENG_01",
+        "timestamp": 1700000000.1234,
+        "event_id": 1
+    }
+    prev_hash = ledger.genesis_block["event_hash"]
+    hash_a = ledger.compute_event_hash(event_a, prev_hash)
+    hash_b = ledger.compute_event_hash(event_b, prev_hash)
+    assert hash_a == hash_b
+    assert hash_a.startswith("0x")
 
-    # 5. Test Tamper Detection
-    audit_pre = ledger.audit_entire_chain(sim.event_log)
-    assert audit_pre["integrity_healthy"], "Chain should be healthy prior to tamper"
+
+def test_timestamp_tampering_detection(ledger):
+    """Ensures that altering the event timestamp triggers a cryptographic hash mismatch."""
+    event = {
+        "event_id": 1,
+        "timestamp": 1700000000.0,
+        "source": "AUTHORIZED_ENG_01",
+        "command_type": "START",
+        "entity_id": "PUMP_A_01",
+        "parameters": {"rpm": 2400.0},
+        "plant_state_snapshot": {"pressure": 5.4}
+    }
+    block = ledger.anchor_event(event)
     
-    # Tamper with local DB record
-    sim.event_log[0]["command_type"] = "MALICIOUS_TAMPER_MODIFIED"
-    audit_post = ledger.audit_entire_chain(sim.event_log)
-    assert not audit_post["integrity_healthy"], "Tamper detection failed to catch altered DB record!"
-    assert audit_post["tampered_blocks_found"] == 1, "Expected exactly 1 tampered block"
-    print(f" [✓] Blockchain tamper detection verified! Tampered block exposed by hash mismatch.")
+    # Tamper the timestamp in the database event
+    tampered_event = copy.deepcopy(event)
+    tampered_event["timestamp"] = 1700000500.0  # shifted by 500s
 
-    # 6. Test Forensic Reconstruction & Backward Walk
+    audit = ledger.audit_entire_chain([tampered_event])
+    assert not audit["integrity_healthy"]
+    assert audit["tampered_blocks_found"] == 1
+    assert audit["audit_details"][0]["reason"] == "HASH_MISMATCH"
+
+
+def test_snapshot_tampering_detection(ledger):
+    """Ensures that altering telemetry state snapshot triggers a hash mismatch."""
+    event = {
+        "event_id": 1,
+        "timestamp": 1700000000.0,
+        "source": "AUTHORIZED_ENG_01",
+        "command_type": "SET_VALVE",
+        "entity_id": "VALVE_VENT_02",
+        "parameters": {"open_percent": 15.0},
+        "plant_state_snapshot": {"pressure_vessel": {"pressure_bar": 5.4}}
+    }
+    ledger.anchor_event(event)
+
+    # Tamper the snapshot data in the database
+    tampered_event = copy.deepcopy(event)
+    tampered_event["plant_state_snapshot"]["pressure_vessel"]["pressure_bar"] = 9.8
+
+    audit = ledger.audit_entire_chain([tampered_event])
+    assert not audit["integrity_healthy"]
+    assert audit["tampered_blocks_found"] == 1
+    assert audit["audit_details"][0]["reason"] == "HASH_MISMATCH"
+
+
+def test_broken_chain_link_detection(ledger):
+    """Verifies that an adversary tampering with previous_hash links is flagged as BROKEN_CHAIN_LINK."""
+    e1 = {"event_id": 1, "timestamp": 1700000001.0, "source": "A", "command_type": "C1", "entity_id": "E1"}
+    e2 = {"event_id": 2, "timestamp": 1700000002.0, "source": "B", "command_type": "C2", "entity_id": "E2"}
+    ledger.anchor_event(e1)
+    ledger.anchor_event(e2)
+
+    # Maliciously re-link block 2's previous_hash
+    ledger.chain[2]["previous_hash"] = "0x" + "f" * 64
+
+    audit = ledger.audit_entire_chain([e1, e2])
+    assert not audit["integrity_healthy"]
+    reasons = [d["reason"] for d in audit["audit_details"] if d.get("tampered")]
+    assert "BROKEN_CHAIN_LINK" in reasons
+
+
+def test_unanchored_db_record_detection(ledger):
+    """Verifies that extra forged records inserted into the off-chain database are caught."""
+    e1 = {"event_id": 1, "timestamp": 1700000001.0, "source": "A", "command_type": "C1", "entity_id": "E1"}
+    ledger.anchor_event(e1)
+
+    e_forged = {"event_id": 999, "timestamp": 1700000002.0, "source": "ATTACKER", "command_type": "INJECT", "entity_id": "VALVE"}
+    
+    audit = ledger.audit_entire_chain([e1, e_forged])
+    assert not audit["integrity_healthy"]
+    unanchored = [d for d in audit["audit_details"] if d.get("reason") == "UNANCHORED_DB_RECORD"]
+    assert len(unanchored) == 1
+    assert unanchored[0]["event_id"] == 999
+
+
+def test_deleted_record_detection(ledger):
+    """Verifies that purged/deleted database records are caught."""
+    e1 = {"event_id": 1, "timestamp": 1700000001.0, "source": "A", "command_type": "C1", "entity_id": "E1"}
+    e2 = {"event_id": 2, "timestamp": 1700000002.0, "source": "B", "command_type": "C2", "entity_id": "E2"}
+    ledger.anchor_event(e1)
+    ledger.anchor_event(e2)
+
+    # Attacker deletes e1 from database
+    audit = ledger.audit_entire_chain([e2])
+    assert not audit["integrity_healthy"]
+    deleted = [d for d in audit["audit_details"] if d.get("reason") == "AUDIT_RECORD_DELETED_FROM_DB"]
+    assert len(deleted) == 1
+    assert deleted[0]["event_id"] == 1
+
+
+def test_forensic_backward_walk_and_policy(ledger, simulator):
+    """Verifies evidence-based backward-walk identifying unauthorized policy violations."""
     forensics = ForensicReconstructionEngine(ledger)
-    recon = forensics.reconstruct_incident(sim.event_log, eval_attack)
-    assert recon["success"], "Reconstruction failed"
-    assert recon["tamper_detected"], "Reconstruction must reflect tamper status"
-    assert recon["root_cause_artifact"] is not None, "Root cause not identified"
-    print(f" [✓] Backward-walk completed: Identified root cause entry [{recon['root_cause_artifact']['source_identity']}]")
+    
+    # 1. Normal baseline commands
+    c1 = simulator.execute_command("AUTHORIZED_ENG_01", "START", "PUMP_A_01", {"rpm": 2400.0})
+    ledger.anchor_event(c1)
+    c2 = simulator.execute_command("SCADA_AUTO_PID", "SET_VALVE", "VALVE_INLET_01", {"open_percent": 75.0})
+    ledger.anchor_event(c2)
 
-    # 7. Test Threat Intel & MITRE ATT&CK for ICS Attribution
-    threat_intel = ThreatIntelligenceEngine()
-    intel = threat_intel.correlate_incident(sim.event_log, eval_attack, tampered_detected=True)
-    assert len(intel["matched_techniques"]) > 0, "No MITRE techniques matched"
-    hypothesis = intel["primary_hypothesis"]
-    assert hypothesis is not None, "Attribution hypothesis missing"
-    print(f" [✓] MITRE ATT&CK ICS correlation: Primary hypothesis '{hypothesis['name']}' with {hypothesis['confidence_score']}% confidence")
+    # 2. Rogue command violating policy
+    c3 = simulator.execute_command("ROGUE_OPERATOR_0x7b", "OVERRIDE_SIS", "SIS_INTERLOCK_01", {"bypass": True, "authorized": False})
+    ledger.anchor_event(c3)
 
-    # 8. Test Report Generator
-    report_gen = ForensicReportGenerator()
-    html = report_gen.generate_html_report(recon, intel, t_attack, ledger.sepolia_contract_address)
-    assert "IRON<span>LEDGER</span> FORENSIC REPORT" in html, "Report HTML missing title"
-    assert "TAMPER DETECTED" in html, "Report HTML missing tamper banner"
-    print(f" [✓] Forensic Report generated successfully ({len(html)} bytes)")
+    recon = forensics.reconstruct_incident(simulator.event_log)
+    assert recon["success"]
+    assert recon["events_analyzed"] == 3
+    assert recon["root_cause_artifact"]["source_identity"] == "ROGUE_OPERATOR_0x7b"
+    assert recon["root_cause_artifact"]["policy_violation"] is True
 
-    print("\n========================================")
-    print("ALL 8 VERIFICATION TESTS PASSED PERFECTLY!")
-    print("========================================")
+
+def test_threat_intel_objective_scoring():
+    """Verifies objective technique overlap scoring and attribution ranking."""
+    engine = ThreatIntelligenceEngine()
+    
+    # Command history matching TRITON signature (T0888 Loss of Safety, T0831 Manipulation of Control, T0855 Unauthorized Command)
+    history = [
+        {"command_type": "OVERRIDE_SIS", "source": "ROGUE_01", "parameters": {"bypass": True}},
+        {"command_type": "SET_VALVE", "source": "ROGUE_01", "parameters": {"open_percent": 0.0}}
+    ]
+    anomaly = {"severity": "CRITICAL"}
+    
+    intel = engine.correlate_incident(history, anomaly, tampered_detected=False)
+    assert len(intel["matched_techniques"]) >= 3
+    assert intel["primary_hypothesis"] is not None
+    assert intel["primary_hypothesis"]["actor_id"] == "XENOTIME"
+    assert intel["primary_hypothesis"]["confidence_score"] > 50.0
+    assert "attribution_caveat" in intel
+
+
+def test_anomaly_detector_physics_and_ml(anomaly_detector, simulator):
+    """Verifies physics envelope safety breaches and Isolation Forest scoring."""
+    nominal_snap = simulator.get_telemetry_snapshot()
+    nominal_eval = anomaly_detector.evaluate_telemetry(nominal_snap)
+    assert nominal_eval["severity"] == "NORMAL"
+    assert nominal_eval["ml_anomaly_score"] < 0.65
+
+    # Trigger overpressure breach
+    simulator.pressure_vessel["pressure_bar"] = 10.5
+    breach_snap = simulator.get_telemetry_snapshot()
+    breach_eval = anomaly_detector.evaluate_telemetry(breach_snap)
+    assert breach_eval["is_anomaly"] is True
+    assert breach_eval["severity"] == "CATASTROPHIC"
+    assert "PRESSURE_VESSEL_PRESSURE" in breach_eval["flagged_sensors"]
+
 
 if __name__ == "__main__":
-    test_full_pipeline()
+    print("=" * 65)
+    print(" 🧪 RUNNING IRONLEDGER AUTOMATED TEST SUITE")
+    print("=" * 65)
+
+    tests = [
+        ("Canonical Hashing Determinism", lambda: test_canonical_hashing_determinism(BlockchainLedger())),
+        ("Timestamp Tamper Detection", lambda: test_timestamp_tampering_detection(BlockchainLedger())),
+        ("Snapshot State Tamper Detection", lambda: test_snapshot_tampering_detection(BlockchainLedger())),
+        ("Broken Chain Link Detection", lambda: test_broken_chain_link_detection(BlockchainLedger())),
+        ("Unanchored Record Detection", lambda: test_unanchored_db_record_detection(BlockchainLedger())),
+        ("Purged / Deleted Record Detection", lambda: test_deleted_record_detection(BlockchainLedger())),
+        ("Policy-Based Backward Walk", lambda: test_forensic_backward_walk_and_policy(BlockchainLedger(), ICSSimulator())),
+        ("Threat Intel Objective Scoring", lambda: test_threat_intel_objective_scoring()),
+        ("Anomaly Detector Physics & ML", lambda: test_anomaly_detector_physics_and_ml(AnomalyDetector(), ICSSimulator())),
+    ]
+
+    passed = 0
+    import traceback
+    for name, test_fn in tests:
+        try:
+            test_fn()
+            print(f"  ✅ PASS: {name}")
+            passed += 1
+        except Exception as e:
+            print(f"  ❌ FAIL: {name} - {e}")
+            traceback.print_exc()
+
+    print("=" * 65)
+    print(f" Results: {passed}/{len(tests)} tests passed successfully.")
+    print("=" * 65)
+

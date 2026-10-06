@@ -3,58 +3,54 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IronLedger - Immutable ICS/SCADA Forensic Evidence Layer
- * @author IronLedger Security Core (Simran & Garima)
- * @notice Deployed on Ethereum Sepolia / Remix IDE for anchoring SCADA commands & sensor events.
+ * @author IronLedger Security Core
+ * @notice Smart contract for anchoring cryptographic state hashes of SCADA commands & sensor events.
  */
 contract IronLedger {
     address public owner;
     uint256 public totalEvents;
+    bytes32 public lastHash;
 
     struct ICSEvent {
         uint256 eventId;
-        bytes32 eventHash;       // SHA-256 / keccak256 fingerprint of event data
+        bytes32 eventHash;       // Deterministic SHA-256 fingerprint of event data
         bytes32 previousHash;    // Cryptographic link to previous block event
         uint256 timestamp;       // Block timestamp
-        string source;           // e.g. "HMI-01", "SCADA-RTU-04", "SYS-ENG"
-        string commandType;      // e.g. "SET_VALVE", "OVERRIDE_SIS", "PUMP_RPM"
-        string entityId;         // e.g. "PUMP_A", "VALVE_VENT_01", "REACTOR_TEMP"
         address recordedBy;      // Signer wallet address
     }
 
     // Mapping from event ID to on-chain event record
     mapping(uint256 => ICSEvent) public events;
-    // Mapping from event hash to event ID
+    // Mapping from event hash to event ID (prevents replay/duplicates)
     mapping(bytes32 => uint256) public hashToEventId;
 
     event EventAnchored(
         uint256 indexed eventId,
         bytes32 indexed eventHash,
+        bytes32 indexed previousHash,
         uint256 timestamp,
         string source,
         string commandType,
         string entityId,
-        address indexed recordedBy
+        address recordedBy
     );
 
-    event TamperAlert(
-        uint256 indexed eventId,
-        bytes32 expectedHash,
-        bytes32 submittedHash,
-        address indexed reporter
-    );
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Only contract owner can execute this");
+        require(msg.sender == owner, "Only contract owner can record events");
         _;
     }
 
-    constructor() {
+    constructor(bytes32 _genesisHash) {
         owner = msg.sender;
         totalEvents = 0;
+        lastHash = _genesisHash != bytes32(0) ? _genesisHash : keccak256("IRONLEDGER_GENESIS_ROOT");
     }
 
     /**
      * @notice Records an ICS command or telemetry state hash onto the immutable ledger.
+     * @dev Enforces strict chain linkage against lastHash and prevents duplicates.
      */
     function recordEvent(
         bytes32 _eventHash,
@@ -62,28 +58,28 @@ contract IronLedger {
         string calldata _source,
         string calldata _commandType,
         string calldata _entityId
-    ) external returns (uint256) {
+    ) external onlyOwner returns (uint256) {
         require(_eventHash != bytes32(0), "Invalid event hash");
+        require(_previousHash == lastHash, "Broken chain link: previousHash does not match lastHash");
+        require(hashToEventId[_eventHash] == 0, "Duplicate event: hash already anchored");
 
-        totalEvents++;
-        uint256 newId = totalEvents;
+        uint256 newId = ++totalEvents;
 
         events[newId] = ICSEvent({
             eventId: newId,
             eventHash: _eventHash,
             previousHash: _previousHash,
             timestamp: block.timestamp,
-            source: _source,
-            commandType: _commandType,
-            entityId: _entityId,
             recordedBy: msg.sender
         });
 
         hashToEventId[_eventHash] = newId;
+        lastHash = _eventHash;
 
         emit EventAnchored(
             newId,
             _eventHash,
+            _previousHash,
             block.timestamp,
             _source,
             _commandType,
@@ -96,11 +92,6 @@ contract IronLedger {
 
     /**
      * @notice Verifies whether a submitted event metadata hash matches the immutable on-chain record.
-     * @param _eventId ID of the event to verify
-     * @param _submittedHash Hash computed from the off-chain database (e.g. Supabase)
-     * @return isValid True if match, false if database record was tampered with!
-     * @return storedHash The authentic on-chain hash
-     * @return blockTimestamp The timestamp when the block was minted
      */
     function verifyHash(uint256 _eventId, bytes32 _submittedHash)
         external
@@ -118,5 +109,14 @@ contract IronLedger {
     function getEvent(uint256 _eventId) external view returns (ICSEvent memory) {
         require(_eventId > 0 && _eventId <= totalEvents, "Event does not exist");
         return events[_eventId];
+    }
+
+    /**
+     * @notice Transfer contract ownership to a new admin address.
+     */
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Invalid new owner address");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
     }
 }

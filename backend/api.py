@@ -1,9 +1,7 @@
 """
-IronLedger - Core FastAPI Server & WebSocket / REST API
+IronLedger - Core FastAPI Server & REST API
 Coordinates SCADA simulation, blockchain evidence anchoring, dual-layer anomaly detection,
 forensic reconstruction, threat intelligence correlation, and serves the frontend dashboard.
-
-Now includes Supabase persistent storage via backend.database.SupabaseDatabase.
 """
 
 import asyncio
@@ -11,7 +9,7 @@ import time
 import os
 import json
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Body, Query
+from fastapi import FastAPI, HTTPException, Body, Query, Header, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -27,8 +25,12 @@ from backend.database import SupabaseDatabase
 app = FastAPI(
     title="IronLedger ICS Forensic Framework",
     description="Blockchain-anchored forensic evidence and MITRE ATT&CK for ICS attribution",
-    version="2.0.0"
+    version="2.1.0"
 )
+
+# Configuration
+CONFIG_API_KEY = os.environ.get("API_KEY", "")
+DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() in ["1", "true", "yes"]
 
 # Initialize Core Services
 simulator = ICSSimulator()
@@ -40,10 +42,29 @@ report_gen = ForensicReportGenerator()
 db = SupabaseDatabase()
 
 
+# ── Auth & Demo Dependencies ──────────────────────────────────────────────────
+
+def verify_api_key(x_api_key: Optional[str] = Header(None)):
+    """Optional API Key protection. Active if API_KEY is defined in environment."""
+    if CONFIG_API_KEY and x_api_key != CONFIG_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing X-API-Key header.")
+    return True
+
+
+def check_demo_mode():
+    """Restricts simulation/tamper routes when DEMO_MODE is disabled in production."""
+    if not DEMO_MODE:
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Attack/tamper endpoints are disabled when DEMO_MODE=false."
+        )
+    return True
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _anchor_and_persist(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Anchor an event on the ledger AND persist both event + block to Supabase."""
+    """Anchor an event on the ledger AND persist both event + block to Supabase if enabled."""
     block = ledger.anchor_event(event)
     db.upsert_event(event)
     db.upsert_block(block)
@@ -53,7 +74,7 @@ def _anchor_and_persist(event: Dict[str, Any]) -> Dict[str, Any]:
 # ── Startup: restore persisted session ───────────────────────────────────────
 
 def seed_baseline():
-    """Record normal startup commands and anchor them."""
+    """Record normal startup commands and anchor them onto the cryptographic chain."""
     cmd1 = simulator.execute_command("AUTHORIZED_ENG_01", "START", "PUMP_A_01", {"rpm": 2400.0})
     _anchor_and_persist(cmd1)
 
@@ -71,9 +92,7 @@ def startup_restore():
     """
     persisted = db.load_events()
     if persisted:
-        # Re-hydrate the in-memory event log from the database
         simulator.event_log = persisted
-        # Rebuild the ledger chain from Supabase too
         blocks = db.load_blocks()
         if blocks:
             ledger.chain = [ledger.genesis_block]  # keep genesis
@@ -113,14 +132,14 @@ class TamperRequest(BaseModel):
     tampered_value: Any
 
 class SaveCaseRequest(BaseModel):
-    case_name: Optional[str] = None  # if omitted, auto-generated
+    case_name: Optional[str] = None
 
 
 # ── REST API Endpoints ────────────────────────────────────────────────────────
 
 @app.get("/api/telemetry")
 async def get_telemetry():
-    """Returns real-time SCADA telemetry, physical states, and anomaly evaluation."""
+    """Returns real-time SCADA telemetry, physical states, anomaly evaluation, and ledger state."""
     snapshot = simulator.update_physics(dt=1.0)
     anomaly_status = detector.evaluate_telemetry(snapshot)
     
@@ -131,10 +150,12 @@ async def get_telemetry():
         "total_events": len(simulator.event_log),
         "total_blocks": len(ledger.chain),
         "db_connected": db.enabled,
+        "blockchain_mode": "LIVE_ETHEREUM_SEPOLIA" if not ledger.is_simulated else "SIMULATED_LOCAL_LEDGER",
+        "demo_mode": DEMO_MODE
     }
 
 @app.post("/api/plant/command")
-async def send_command(cmd: CommandRequest):
+async def send_command(cmd: CommandRequest, _=Depends(verify_api_key)):
     """Dispatches an ICS command and anchors it onto the blockchain ledger."""
     event = simulator.execute_command(
         source=cmd.source,
@@ -151,13 +172,13 @@ async def send_command(cmd: CommandRequest):
     }
 
 @app.post("/api/attack/inject")
-async def inject_attack(payload: AttackRequest):
+async def inject_attack(payload: AttackRequest, _=Depends(check_demo_mode), __=Depends(verify_api_key)):
     """Injects a standardized ICS threat scenario (Stuxnet, Triton, Overpressure, Log Tamper)."""
     scenario = payload.scenario
     meta = simulator.inject_attack(scenario)
 
     if scenario == "triton":
-        e1 = simulator.execute_command("ROGUE_OPERATOR_0x7b", "OVERRIDE_SIS", "SIS_INTERLOCK_01", {"bypass": True})
+        e1 = simulator.execute_command("ROGUE_OPERATOR_0x7b", "OVERRIDE_SIS", "SIS_INTERLOCK_01", {"bypass": True, "authorized": False})
         _anchor_and_persist(e1)
         e2 = simulator.execute_command("ROGUE_OPERATOR_0x7b", "SET_VALVE", "VALVE_VENT_02", {"open_percent": 0.0})
         _anchor_and_persist(e2)
@@ -173,13 +194,12 @@ async def inject_attack(payload: AttackRequest):
         _anchor_and_persist(e2)
 
     elif scenario == "log_tamper":
-        e1 = simulator.execute_command("EXPLOIT_PAYLOAD", "OVERRIDE_SIS", "SIS_INTERLOCK_01", {"bypass": True})
+        e1 = simulator.execute_command("ROGUE_OPERATOR_0x7b", "OVERRIDE_SIS", "SIS_INTERLOCK_01", {"bypass": True, "authorized": False})
         _anchor_and_persist(e1)
-        # Tamper BOTH the in-memory record AND the Supabase row to demonstrate full tamper detection
+        # Tamper the in-memory record and Supabase row to simulate off-chain historian modification
         e1["command_type"] = "ROUTINE_DIAGNOSTIC_PING"
         e1["parameters"] = {"test": "ok"}
         e1["source"] = "MAINTENANCE_TECH_03"
-        # Persist the tampered version to Supabase — this is what the blockchain audit will catch!
         db.tamper_event_field(e1["event_id"], "command_type", "ROUTINE_DIAGNOSTIC_PING")
         db.tamper_event_field(e1["event_id"], "source", "MAINTENANCE_TECH_03")
         db.tamper_event_field(e1["event_id"], "parameters", {"test": "ok"})
@@ -193,7 +213,7 @@ async def inject_attack(payload: AttackRequest):
     }
 
 @app.post("/api/attack/stop")
-async def stop_attack():
+async def stop_attack(_=Depends(check_demo_mode), __=Depends(verify_api_key)):
     """Stops attack and resets plant parameters to nominal baseline."""
     simulator.stop_attack()
     reset_event = simulator.execute_command("AUTHORIZED_ENG_01", "RESET_TRIP", "SIS_INTERLOCK_01", {})
@@ -204,18 +224,15 @@ async def stop_attack():
     }
 
 @app.post("/api/tamper/simulate")
-async def simulate_tamper(req: TamperRequest):
+async def simulate_tamper(req: TamperRequest, _=Depends(check_demo_mode), __=Depends(verify_api_key)):
     """
     Simulates malicious tampering in the local database (both in-memory + Supabase)
     to prove blockchain tamper-detection capabilities.
     """
-    found = False
     for ev in simulator.event_log:
         if ev.get("event_id") == req.event_id:
-            found = True
             original_value = ev.get(req.malicious_field)
             ev[req.malicious_field] = req.tampered_value
-            # Also patch Supabase to make the tamper real
             db.tamper_event_field(req.event_id, req.malicious_field, req.tampered_value)
             return {
                 "status": "DATABASE_RECORD_TAMPERED",
@@ -224,7 +241,7 @@ async def simulate_tamper(req: TamperRequest):
                 "original_value": original_value,
                 "tampered_value": req.tampered_value,
                 "supabase_patched": db.enabled,
-                "note": "Off-chain database record altered! Blockchain hash on Sepolia remains immutable.",
+                "note": "Off-chain database record altered! Cryptographic hash anchor exposes deviation.",
             }
     
     raise HTTPException(status_code=404, detail=f"Event ID {req.event_id} not found in database.")
@@ -285,7 +302,7 @@ async def get_forensic_report():
 # ── Forensic Cases API ────────────────────────────────────────────────────────
 
 @app.post("/api/cases/save")
-async def save_forensic_case(req: SaveCaseRequest):
+async def save_forensic_case(req: SaveCaseRequest, _=Depends(verify_api_key)):
     """
     Runs a full forensic reconstruction + threat intel correlation and saves the
     result as a named forensic case in Supabase for permanent record-keeping.
@@ -302,7 +319,6 @@ async def save_forensic_case(req: SaveCaseRequest):
         tampered_detected=tampered
     )
 
-    # Auto-generate a case name if not supplied
     active_attack = simulator.active_attack or "baseline"
     auto_name = f"ICS-{active_attack.upper()}-{time.strftime('%Y%m%d-%H%M%S')}"
     case_name = req.case_name.strip() if req.case_name else auto_name
@@ -326,7 +342,6 @@ async def save_forensic_case(req: SaveCaseRequest):
             },
         }
     else:
-        # Supabase not configured — return the data anyway
         return {
             "status": "CASE_NOT_PERSISTED_DB_OFFLINE",
             "note": "Supabase not configured. Set SUPABASE_URL and SUPABASE_KEY in .env to enable persistence.",
