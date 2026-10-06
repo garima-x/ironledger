@@ -1,7 +1,7 @@
 """
 IronLedger - Blockchain Evidence Layer & Cryptographic Anchoring
 Provides immutable ledger anchoring, SHA-256 state hashing, Ethereum Sepolia integration,
-and cryptographic tamper detection against off-chain databases.
+and cryptographic tamper detection against off-chain databases and modified local chains.
 """
 
 import os
@@ -9,6 +9,8 @@ import json
 import time
 import hashlib
 import secrets
+import threading
+from queue import Queue
 from typing import Dict, Any, List, Optional, Tuple
 
 try:
@@ -35,56 +37,67 @@ def _canon(obj: Any) -> str:
     return json.dumps(cleaned, sort_keys=True, separators=(',', ':'))
 
 
+GENESIS_PAYLOAD = {"genesis_root": "IRONLEDGER_ICS_GENESIS_ROOT_V2"}
+GENESIS_HASH = "0x" + hashlib.sha256(_canon(GENESIS_PAYLOAD).encode('utf-8')).hexdigest()
+
+
 class BlockchainLedger:
     def __init__(self, sepolia_contract_address: Optional[str] = None):
         self.sepolia_contract_address = (
             sepolia_contract_address
-            or os.environ.get("SEPOLIA_CONTRACT_ADDRESS", "0x7a36B3DeE1F03287cCE488f2604245F11dF9d78F")
+            or os.environ.get("SEPOLIA_CONTRACT_ADDRESS", "0x91FB25541e11512E441Ebb980f0EADad8cD81a6A")
         )
-        self.rpc_url = os.environ.get("SEPOLIA_RPC_URL", "")
-        self.private_key = os.environ.get("ANCHOR_PRIVATE_KEY", "")
+        self.rpc_url = os.environ.get("SEPOLIA_RPC_URL", "").strip()
+        self.private_key = os.environ.get("ANCHOR_PRIVATE_KEY", "").strip()
         
         self.w3: Optional[Any] = None
         self.contract: Optional[Any] = None
         self.account: Optional[Any] = None
         self.is_simulated = True
 
-        self._init_web3()
-
         self.chain: List[Dict[str, Any]] = []
         self.hash_index: Dict[str, Dict[str, Any]] = {}
         self.latest_sepolia_block = 6849200
+        
+        # Tamper-isolated anchor mirror to detect local in-memory chain rebuilds
+        self._immutable_anchor_mirror: List[Dict[str, Any]] = []
+
+        # Background async transaction queue
+        self._tx_queue: Queue = Queue()
+        self._queue_worker_running = False
+
+        self._init_web3()
 
         # Deterministic Genesis Block
-        genesis_payload = {"genesis_root": "IRONLEDGER_ICS_GENESIS_ROOT_V2"}
-        genesis_hash = hashlib.sha256(_canon(genesis_payload).encode('utf-8')).hexdigest()
         self.genesis_block = {
             "block_index": 0,
             "event_id": 0,
-            "event_hash": f"0x{genesis_hash}",
+            "event_hash": GENESIS_HASH,
             "previous_hash": "0x" + "0" * 64,
             "timestamp": 1700000000,
             "timestamp_ms": 1700000000000,
             "source": "GENESIS_NODE",
             "command_type": "INITIALIZE_LEDGER",
             "entity_id": "SYS_ROOT",
-            "tx_hash": "0x" + "0" * 63 + "1",
+            "tx_hash": None,
             "block_number": self.latest_sepolia_block,
             "recorded_by": "0x0000000000000000000000000000000000000000",
             "status": "CONFIRMED_ON_CHAIN" if not self.is_simulated else "SIMULATED_LOCAL_CHAIN",
-            "is_simulated": self.is_simulated
+            "is_simulated": self.is_simulated,
+            "etherscan_url": None
         }
         self.chain.append(self.genesis_block)
         self.hash_index[self.genesis_block["event_hash"]] = self.genesis_block
+        self._immutable_anchor_mirror.append(dict(self.genesis_block))
 
     def _init_web3(self):
-        """Initializes Web3 connection if RPC URL and private key are supplied."""
+        """Initializes Web3 connection and starts non-blocking background queue worker."""
         if WEB3_AVAILABLE and self.rpc_url and self.private_key and self.sepolia_contract_address:
             try:
                 self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
                 if self.w3.is_connected():
                     self.account = self.w3.eth.account.from_key(self.private_key)
-                    abi_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "contracts", "IronLedgerABI.json")
+                    abi_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "contracts", "EvidenceChainABI.json")
                     if os.path.exists(abi_path):
                         with open(abi_path, "r") as f:
                             abi = json.load(f)
@@ -93,12 +106,87 @@ class BlockchainLedger:
                             abi=abi
                         )
                         self.is_simulated = False
+                        self._start_queue_worker()
                         print(f"🔗 Connected to Ethereum Sepolia via Web3. Wallet: {self.account.address}")
             except Exception as e:
                 print(f"⚠️  Web3 Sepolia connection fallback to simulation mode: {e}")
                 self.is_simulated = True
         else:
             self.is_simulated = True
+
+    def _start_queue_worker(self):
+        """Starts background worker thread for non-blocking Ethereum transaction broadcasts."""
+        if not self._queue_worker_running:
+            self._queue_worker_running = True
+            worker = threading.Thread(target=self._process_tx_queue, daemon=True)
+            worker.start()
+
+    def _process_tx_queue(self):
+        """Background worker loop broadcasting transactions to Sepolia without freezing HTTP API."""
+        while self._queue_worker_running:
+            try:
+                task = self._tx_queue.get(timeout=1.0)
+            except Exception:
+                continue
+
+            block_ref = task.get("block_ref")
+            event = task.get("event")
+            event_hash = block_ref["event_hash"]
+            prev_hash = block_ref["previous_hash"]
+
+            try:
+                # EvidenceChain.addEvidence(string _caseId, string _evidenceHash, string _description)
+                # _caseId      → entity_id  (e.g. "PLANT", "REACTOR-1")
+                # _evidenceHash → SHA-256 hex string of the ICS event
+                # _description  → "<command_type> | <source>" for human-readable audit trail
+                case_id = str(event.get("entity_id", "IRONLEDGER"))
+                description = f"{event.get('command_type', 'EVENT')} | {event.get('source', 'UNKNOWN')}"
+
+                # Fetch pending nonce to avoid collision
+                nonce = self.w3.eth.get_transaction_count(self.account.address, 'pending')
+
+                base_fee = self.w3.eth.get_block('latest').get('baseFeePerGas', self.w3.to_wei(1, 'gwei'))
+                priority_fee = self.w3.to_wei(2, 'gwei')
+                max_fee = base_fee * 2 + priority_fee
+
+                func_call = self.contract.functions.addEvidence(case_id, event_hash, description)
+                try:
+                    estimated_gas = func_call.estimate_gas({"from": self.account.address})
+                    gas_limit = int(estimated_gas * 1.25)
+                except Exception:
+                    gas_limit = 1500000
+
+                tx = func_call.build_transaction({
+                    "from": self.account.address,
+                    "nonce": nonce,
+                    "gas": gas_limit,
+                    "maxFeePerGas": max_fee,
+                    "maxPriorityFeePerGas": priority_fee,
+                    "chainId": 11155111
+                })
+                signed = self.account.sign_transaction(tx)
+                raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+                tx_sent = self.w3.eth.send_raw_transaction(raw_tx)
+                tx_hash_hex = tx_sent.hex()
+
+                block_ref["tx_hash"] = tx_hash_hex
+                block_ref["etherscan_url"] = f"https://sepolia.etherscan.io/tx/{tx_hash_hex}"
+                block_ref["status"] = "PENDING_CONFIRMATION"
+
+                # Wait for receipt asynchronously in worker
+                receipt = self.w3.eth.wait_for_transaction_receipt(tx_sent, timeout=120)
+                if receipt.status == 1:
+                    block_ref["block_number"] = receipt.blockNumber
+                    block_ref["status"] = "CONFIRMED_ON_CHAIN"
+                else:
+                    block_ref["status"] = "REVERTED_ON_CHAIN"
+            except Exception as exc:
+                print(f"⚠️ On-chain broadcast failed for block #{block_ref.get('block_index')}: {exc}")
+                block_ref["status"] = "FAILED_ON_CHAIN"
+                block_ref["tx_hash"] = None
+                block_ref["etherscan_url"] = None
+
+            self._tx_queue.task_done()
 
     def compute_event_hash(self, event: Dict[str, Any], previous_hash: str) -> str:
         """
@@ -127,7 +215,8 @@ class BlockchainLedger:
     def anchor_event(self, event: Dict[str, Any], signer_address: Optional[str] = None) -> Dict[str, Any]:
         """
         Anchors an ICS event onto the immutable blockchain ledger.
-        Broadcasts to Ethereum Sepolia if Web3 is configured, or generates cryptographic proof locally.
+        In live mode: queues transaction to Sepolia without blocking API.
+        In simulated mode: generates cryptographic hash chain with transparent simulation labeling.
         """
         prev_block = self.chain[-1]
         prev_hash = prev_block["event_hash"]
@@ -136,50 +225,7 @@ class BlockchainLedger:
         ts_sec = float(event.get("timestamp", time.time()))
         ts_ms = int(ts_sec * 1000)
 
-        tx_hash = None
-        block_num = None
-        status = "SIMULATED_LOCAL_CHAIN"
         recorded_by = signer_address or (self.account.address if self.account else "0x2C4e08287F4b8f04c64391F0317eDeF1778cD630")
-
-        # Attempt on-chain broadcast if real Web3 is active
-        if not self.is_simulated and self.w3 and self.contract and self.account:
-            try:
-                event_hash_bytes = bytes.fromhex(event_hash[2:])
-                prev_hash_bytes = bytes.fromhex(prev_hash[2:])
-                tx = self.contract.functions.recordEvent(
-                    event_hash_bytes,
-                    prev_hash_bytes,
-                    str(event.get("source", "")),
-                    str(event.get("command_type", "")),
-                    str(event.get("entity_id", ""))
-                ).build_transaction({
-                    "from": self.account.address,
-                    "nonce": self.w3.eth.get_transaction_count(self.account.address),
-                    "gas": 200000,
-                    "maxFeePerGas": self.w3.eth.gas_price * 2,
-                    "maxPriorityFeePerGas": self.w3.to_wei(2, 'gwei'),
-                    "chainId": 11155111  # Sepolia Chain ID
-                })
-                signed = self.account.sign_transaction(tx)
-                raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
-                tx_sent = self.w3.eth.send_raw_transaction(raw_tx)
-                tx_hash = tx_sent.hex()
-                status = "PENDING_ON_CHAIN"
-                # Wait for receipt in non-blocking / short timeout or record hash
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_sent, timeout=30)
-                block_num = receipt.blockNumber
-                status = "CONFIRMED_ON_CHAIN"
-            except Exception as e:
-                print(f"⚠️ Live on-chain transaction failed: {e}. Falling back to cryptographic simulation.")
-                tx_hash = f"0x{secrets.token_hex(32)}"
-                self.latest_sepolia_block += 1
-                block_num = self.latest_sepolia_block
-                status = "SIMULATED_LOCAL_CHAIN"
-        else:
-            self.latest_sepolia_block += 1
-            tx_hash = f"0x{secrets.token_hex(32)}"
-            block_num = self.latest_sepolia_block
-            status = "SIMULATED_LOCAL_CHAIN"
 
         block = {
             "block_index": len(self.chain),
@@ -191,65 +237,122 @@ class BlockchainLedger:
             "source": str(event.get("source", "UNKNOWN")),
             "command_type": str(event.get("command_type", "TELEMETRY_SNAPSHOT")),
             "entity_id": str(event.get("entity_id", "PLANT")),
-            "tx_hash": tx_hash,
-            "block_number": block_num,
+            "tx_hash": None,
+            "block_number": self.latest_sepolia_block + len(self.chain),
             "recorded_by": recorded_by,
-            "status": status,
+            "status": "QUEUED_ON_CHAIN" if not self.is_simulated else "SIMULATED_LOCAL_CHAIN",
             "is_simulated": self.is_simulated,
-            "etherscan_url": f"https://sepolia.etherscan.io/tx/{tx_hash}"
+            "etherscan_url": None
         }
 
         self.chain.append(block)
         self.hash_index[event_hash] = block
+        self._immutable_anchor_mirror.append(dict(block))
+
+        # If live Web3 is active, queue for background on-chain broadcast
+        if not self.is_simulated and self.contract and self.account:
+            self._tx_queue.put({"block_ref": block, "event": event})
+
         return block
 
-    def verify_event_integrity(self, db_event: Dict[str, Any], block_index: int) -> Dict[str, Any]:
+    def verify_against_contract(self) -> Dict[str, Any]:
         """
-        Cross-examines database record against on-chain block.
-        Recomputes hash against previous block's hash.
+        Read-back verification directly querying the deployed Smart Contract on Sepolia.
+        Checks totalEvents, lastHash, and verifies each eventHash against getEvent(i).
         """
-        if block_index < 0 or block_index >= len(self.chain):
+        if self.is_simulated or not self.contract or not self.w3:
             return {
-                "verified": False,
-                "tampered": True,
-                "reason": "BLOCK_NOT_FOUND",
-                "error": f"Block index {block_index} outside blockchain bounds"
+                "contract_connected": False,
+                "mode": "SIMULATION",
+                "verified": True,
+                "note": "Running in local cryptographic simulation mode."
             }
 
-        immutable_block = self.chain[block_index]
-        prev_hash = immutable_block["previous_hash"]
-        computed_hash = self.compute_event_hash(db_event, prev_hash)
-        expected_hash = immutable_block["event_hash"]
+        try:
+            # EvidenceChain: evidenceCount() replaces totalEvents()
+            # EvidenceChain has no lastHash() — chain integrity is enforced off-chain
+            total_onchain = self.contract.functions.evidenceCount().call()
 
-        is_valid = (computed_hash.lower() == expected_hash.lower())
-        
-        return {
-            "verified": is_valid,
-            "tampered": not is_valid,
-            "block_index": block_index,
-            "event_id": db_event.get("event_id"),
-            "immutable_onchain_hash": expected_hash,
-            "computed_db_hash": computed_hash,
-            "tx_hash": immutable_block["tx_hash"],
-            "block_number": immutable_block["block_number"],
-            "timestamp": immutable_block["timestamp"],
-            "verdict": "VERIFIED_AUTHENTIC" if is_valid else "TAMPER_DETECTED_HASH_MISMATCH"
-        }
+            discrepancies = []
+            checked_count = min(total_onchain, len(self.chain) - 1)
+
+            for i in range(1, checked_count + 1):
+                ev_data = self.contract.functions.getEvidence(i).call()
+                # ev_data: (evidenceId, caseId, evidenceHash, description, uploadedBy, timestamp)
+                onchain_ev_hash = ev_data[2]  # evidenceHash is a plain string, no .hex() needed
+                local_ev_hash = self.chain[i]["event_hash"]
+
+                if onchain_ev_hash.lower() != local_ev_hash.lower():
+                    discrepancies.append({
+                        "event_id": i,
+                        "onchain_hash": onchain_ev_hash,
+                        "local_hash": local_ev_hash,
+                        "reason": "ONCHAIN_SMART_CONTRACT_MISMATCH"
+                    })
+
+            return {
+                "contract_connected": True,
+                "mode": "LIVE_SEPOLIA",
+                "total_onchain_events": total_onchain,
+                "verified": len(discrepancies) == 0,
+                "discrepancies": discrepancies
+            }
+        except Exception as e:
+            return {
+                "contract_connected": False,
+                "mode": "LIVE_SEPOLIA_ERROR",
+                "error": str(e),
+                "verified": False
+            }
 
     def audit_entire_chain(self, db_events: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Audits all off-chain events against the on-chain immutable hash history.
-        Verifies previous_hash linkage across every block and flags unanchored records or deletions.
+        Audits all off-chain events against the immutable hash history.
+        Carries true previous hash forward, compares against immutable anchor mirror
+        (detecting forged chain rebuilds), and reads back from smart contract if live.
         """
         db_map = {e.get("event_id"): e for e in db_events if "event_id" in e}
         findings = []
         prev = self.genesis_block["event_hash"]
 
+        # 1. Check against the immutable anchor mirror to detect in-memory chain rebuilds
+        for idx in range(1, max(len(self.chain), len(self._immutable_anchor_mirror))):
+            if idx >= len(self._immutable_anchor_mirror):
+                findings.append({
+                    "block_index": idx,
+                    "event_id": self.chain[idx].get("event_id") if idx < len(self.chain) else None,
+                    "tampered": True,
+                    "reason": "FORGED_CHAIN_EXTENSION",
+                    "verdict": "TAMPER_DETECTED_FORGED_BLOCK"
+                })
+            elif idx >= len(self.chain):
+                findings.append({
+                    "block_index": idx,
+                    "event_id": self._immutable_anchor_mirror[idx].get("event_id"),
+                    "tampered": True,
+                    "reason": "CHAIN_TRUNCATION_DETECTED",
+                    "verdict": "TAMPER_DETECTED_TRUNCATED_CHAIN"
+                })
+            else:
+                curr_blk = self.chain[idx]
+                mirror_blk = self._immutable_anchor_mirror[idx]
+                if curr_blk.get("event_hash") != mirror_blk.get("event_hash"):
+                    findings.append({
+                        "block_index": idx,
+                        "event_id": curr_blk.get("event_id"),
+                        "tampered": True,
+                        "reason": "LOCAL_CHAIN_REBUILT_HASH_MISMATCH",
+                        "immutable_onchain_hash": mirror_blk.get("event_hash"),
+                        "computed_db_hash": curr_blk.get("event_hash"),
+                        "verdict": "TAMPER_DETECTED_CHAIN_REWRITE"
+                    })
+
+        # 2. Audit off-chain database records against chain
         for blk in self.chain[1:]:
             blk_idx = blk.get("block_index")
             ev_id = blk.get("event_id")
 
-            # 1. Verify previous_hash link against the actual previous on-chain block's hash
+            # Verify previous_hash link
             if blk.get("previous_hash") != prev:
                 findings.append({
                     "block_index": blk_idx,
@@ -261,7 +364,7 @@ class BlockchainLedger:
                     "verdict": "TAMPER_DETECTED_BROKEN_CHAIN_LINK"
                 })
 
-            # 2. Check if the database record was purged/deleted
+            # Check if database record was deleted
             ev = db_map.get(ev_id)
             if ev is None:
                 findings.append({
@@ -274,7 +377,7 @@ class BlockchainLedger:
                     "verdict": "TAMPER_DETECTED_RECORD_DELETED"
                 })
             else:
-                # 3. Recompute hash using the true prev hash
+                # Recompute hash using true prev hash
                 computed = self.compute_event_hash(ev, prev)
                 expected = blk.get("event_hash", "")
                 if computed.lower() != expected.lower():
@@ -305,7 +408,7 @@ class BlockchainLedger:
 
             prev = blk.get("event_hash")
 
-        # 4. Check for forged / unanchored events inserted directly into DB
+        # 3. Check for forged / unanchored events inserted into DB
         anchored_ids = {b.get("event_id") for b in self.chain[1:]}
         for unanchored_id in set(db_map.keys()) - anchored_ids:
             if unanchored_id is not None:
@@ -319,11 +422,26 @@ class BlockchainLedger:
                     "verdict": "TAMPER_DETECTED_UNANCHORED_RECORD"
                 })
 
+        # 4. Smart contract read-back check (if Web3 is active)
+        contract_status = self.verify_against_contract()
+        if contract_status.get("contract_connected") and not contract_status.get("verified"):
+            for disc in contract_status.get("discrepancies", []):
+                findings.append({
+                    "block_index": disc.get("event_id"),
+                    "event_id": disc.get("event_id"),
+                    "tampered": True,
+                    "reason": "ONCHAIN_SMART_CONTRACT_MISMATCH",
+                    "immutable_onchain_hash": disc.get("onchain_hash"),
+                    "computed_db_hash": disc.get("local_hash"),
+                    "verdict": "TAMPER_DETECTED_ONCHAIN_DISCREPANCY"
+                })
+
         tampered_count = sum(1 for f in findings if f.get("tampered"))
         return {
             "total_blocks_checked": len(self.chain) - 1,
             "tampered_blocks_found": tampered_count,
             "integrity_healthy": (tampered_count == 0),
+            "contract_verification": contract_status,
             "audit_details": findings
         }
 

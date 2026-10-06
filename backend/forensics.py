@@ -2,23 +2,36 @@
 IronLedger - Forensic Reconstruction & Backward-Walk Engine
 Performs backward traversal along the immutable cryptographic hash chain,
 reconstructs chronological attack timelines, evaluates unauthorized policy violations,
-and verifies on-chain evidence integrity.
+and verifies on-chain evidence integrity against value-based physical safety limits.
 """
 
 import time
+import hmac
+import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 from backend.blockchain import BlockchainLedger
 
 AUTHORIZED_SOURCES = {"AUTHORIZED_ENG_01", "SCADA_AUTO_PID", "GENESIS_NODE"}
+SCADA_HMAC_SECRET = b"IRONLEDGER_SCADA_HMAC_SECRET_V1"
 
 
 class ForensicReconstructionEngine:
     def __init__(self, ledger: BlockchainLedger):
         self.ledger = ledger
 
+    def _verify_command_signature(self, event: Dict[str, Any]) -> bool:
+        """Verifies optional cryptographic HMAC signature on high-privilege commands."""
+        sig = event.get("signature")
+        if not sig:
+            return True  # If signature not configured, allow value-based policy checking
+        payload = f"{event.get('source')}:{event.get('command_type')}:{event.get('entity_id')}"
+        expected = hmac.new(SCADA_HMAC_SECRET, payload.encode('utf-8'), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected)
+
     def _evaluate_command_policy(self, event: Dict[str, Any]) -> Tuple[bool, str, str]:
         """
-        Evaluates whether a command complies with SCADA operational policies.
+        Evaluates whether a command complies with SCADA operational safety policies.
+        Enforces value-based physical envelope limits regardless of self-reported identity.
         Returns: (is_violation: bool, kill_chain_phase: str, policy_reason: str)
         """
         source = str(event.get("source", "UNKNOWN"))
@@ -26,7 +39,28 @@ class ForensicReconstructionEngine:
         params = event.get("parameters", {})
         entity_id = str(event.get("entity_id", "UNKNOWN"))
 
-        # Policy 1: Source authorization allowlist
+        # Check 1: Value-based physical boundary limits (Applies to ANY source, even if claiming to be authorized)
+        if cmd_type == "SET_RPM":
+            rpm = float(params.get("rpm", 2400.0))
+            if rpm > 3000.0:
+                return True, "Equipment Overspeed Escalation (T0836)", f"Command requested {rpm} RPM exceeding hard safe limit of 3000 RPM (Source: {source})."
+            if rpm < 1000.0 and rpm > 0.0:
+                return True, "Equipment Sub-Harmonic Stall (T0836)", f"Command requested {rpm} RPM in destructive mechanical resonance band."
+
+        if cmd_type == "SET_VALVE" and "VENT" in entity_id:
+            open_pct = float(params.get("open_percent", 15.0))
+            if open_pct < 5.0:
+                return True, "Process Parameter Manipulation (T0836)", f"Relief vent clamped shut (0%) during active operations (Source: {source})."
+
+        if cmd_type == "OVERRIDE_SIS":
+            if not params.get("authorized", False) or not params.get("dual_signoff", False):
+                return True, "Safety Interlock Neutralization (T0888)", f"SIS interlock bypass executed without verified dual-operator safety sign-off (Source: {source})."
+
+        # Check 2: Cryptographic signature verification
+        if not self._verify_command_signature(event):
+            return True, "Forged Command Signature (T0855)", f"Invalid cryptographic command signature from origin '{source}'."
+
+        # Check 3: Source authorization allowlist
         if source not in AUTHORIZED_SOURCES:
             if "OVERRIDE" in cmd_type or "SIS" in cmd_type or params.get("bypass"):
                 return True, "Safety Interlock Neutralization (T0888)", f"Unauthorized operator '{source}' bypassed SIS interlocks."
@@ -36,19 +70,13 @@ class ForensicReconstructionEngine:
                 return True, "Manipulation of Control (T0831)", f"Unauthorized operator '{source}' modified pump operational speed."
             return True, "Unauthorized Command Injection (T0855)", f"Command dispatched from unauthenticated origin '{source}'."
 
-        # Policy 2: Dangerous commands requiring explicit dual-authorization
-        if cmd_type == "OVERRIDE_SIS" and not params.get("authorized", False):
-            return True, "Safety Interlock Neutralization (T0888)", "SIS logic bypass executed without dual-operator safety sign-off."
-
-        if cmd_type == "SET_VALVE" and params.get("open_percent", 100) < 5.0 and "VENT" in entity_id:
-            return True, "Process Parameter Manipulation (T0836)", "Relief vent clamped shut during high-throughput operational mode."
-
         # Normal operational command
         phase_map = {
             "START": "Authorized Process Activation",
             "SET_VALVE": "Routine Process Adjustment",
             "SET_RPM": "Routine Speed Regulation",
             "STOP": "Controlled Equipment Shutdown",
+            "RESET_TRIP": "Safety System Normalization",
             "TELEMETRY_SNAPSHOT": "Telemetry Observation",
             "INITIALIZE_LEDGER": "System Initialization"
         }
@@ -61,7 +89,7 @@ class ForensicReconstructionEngine:
     ) -> Dict[str, Any]:
         """
         Executes evidence-based backward-walk along the blockchain ledger:
-        Traverses from the detected anomaly backwards along previous_hash links to isolate root cause.
+        Traverses backwards along previous_hash links to isolate root cause.
         """
         if not db_events:
             return {
@@ -83,14 +111,12 @@ class ForensicReconstructionEngine:
         root_cause_candidate = None
         policy_violations_found = []
 
-        # Iterate backward through anchored blockchain blocks (skipping genesis)
         reversed_blocks = list(reversed(self.ledger.chain[1:]))
 
         for idx, block in enumerate(reversed_blocks):
             ev_id = block.get("event_id")
             db_ev = db_map.get(ev_id, {})
             
-            # Use database event if present, otherwise fallback to on-chain block data
             source = db_ev.get("source") or block.get("source", "UNKNOWN")
             cmd_type = db_ev.get("command_type") or block.get("command_type", "UNKNOWN")
             entity_id = db_ev.get("entity_id") or block.get("entity_id", "UNKNOWN")
@@ -106,12 +132,13 @@ class ForensicReconstructionEngine:
                     tamper_note = f"RECORD TAMPERED: Off-chain DB record deviates from on-chain SHA-256 anchor! ({detail.get('reason')})"
                     break
 
-            # Evaluate operational policy
+            # Evaluate operational policy & value limits
             is_violation, kill_chain_phase, policy_reason = self._evaluate_command_policy({
                 "source": source,
                 "command_type": cmd_type,
                 "entity_id": entity_id,
-                "parameters": parameters
+                "parameters": parameters,
+                "signature": db_ev.get("signature")
             })
 
             step_entry = {
@@ -138,16 +165,13 @@ class ForensicReconstructionEngine:
 
             if is_violation:
                 policy_violations_found.append(step_entry)
-                # The earliest violation in the sequence (last encountered in backward walk) is the true root cause
                 root_cause_candidate = step_entry
 
             reconstructed_steps.append(step_entry)
 
-        # Order chronologically for display (from earliest root cause -> latest impact)
         timeline = list(reversed(reconstructed_steps))
 
         if not root_cause_candidate and timeline:
-            # Fallback to earliest entry if no policy violation detected
             root_cause_candidate = timeline[0]
 
         return {

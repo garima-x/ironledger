@@ -1,11 +1,12 @@
 """
 IronLedger - Forensic Incident Report Generator
-Compiles court-admissible, cryptographically verified ICS incident reports
+Compiles structured, cryptographically verified ICS incident reports
 with chain-of-custody, backward-walk timeline, and MITRE ATT&CK for ICS attribution.
 """
 
 import time
 from typing import Dict, Any, List
+
 
 class ForensicReportGenerator:
     def generate_html_report(
@@ -13,9 +14,10 @@ class ForensicReportGenerator:
         forensic_data: Dict[str, Any],
         threat_intel: Dict[str, Any],
         telemetry_snapshot: Dict[str, Any],
-        contract_address: str = "0x7a36B3DeE1F03287cCE488f2604245F11dF9d78F"
+        contract_address: str = "0x7a36B3DeE1F03287cCE488f2604245F11dF9d78F",
+        is_simulated: bool = True
     ) -> str:
-        """Generates self-contained, publication-grade HTML digital forensics report."""
+        """Generates self-contained, publication-grade HTML digital forensics report with clear mode disclosure."""
         timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
         report_id = f"IL-ICS-FOR-{int(time.time())}"
         root_cause = forensic_data.get("root_cause_artifact", {})
@@ -23,11 +25,41 @@ class ForensicReportGenerator:
         actor = threat_intel.get("primary_hypothesis", {})
         tampered = forensic_data.get("tamper_detected", False)
 
+        mode_badge = (
+            '<span class="mode-simulated">LOCAL SIMULATION MODE (SHA-256 HASH CHAIN)</span>'
+            if is_simulated else
+            '<span class="mode-live">LIVE ETHEREUM SEPOLIA ANCHOR</span>'
+        )
+
+        mode_banner = (
+            """<div class="alert-banner warning">
+                <strong>⚠️ EVIDENCE NOTICE — SIMULATION MODE ACTIVE:</strong>
+                This report was generated using IronLedger's local cryptographic SHA-256 state ledger.
+                Transactions were verified against the local anchor state mirror and were not broadcast to the public Ethereum Sepolia testnet.
+            </div>"""
+            if is_simulated else
+            f"""<div class="alert-banner success">
+                <strong>🔗 LIVE ON-CHAIN ANCHOR VERIFIED:</strong>
+                State hashes are committed directly to Ethereum Sepolia Smart Contract <code>{contract_address}</code>.
+            </div>"""
+        )
+
         # Build timeline HTML rows
         timeline_rows = ""
         for item in timeline:
             badge_class = "tamper-badge" if item.get("tampered") else "valid-badge"
             badge_text = "TAMPERED MISMATCH" if item.get("tampered") else "BLOCKCHAIN VERIFIED"
+            
+            tx_display = item.get("tx_hash")
+            if tx_display and not is_simulated:
+                tx_link = f'<a href="{item.get("etherscan_url")}" target="_blank" class="tx-link">{tx_display[:10]}...</a>'
+            elif tx_display:
+                tx_link = f'<span class="tx-sim">{tx_display[:10]}... (Sim)</span>'
+            else:
+                tx_link = '<span class="tx-none">Local Anchor</span>'
+
+            policy_text = f"<br><small style='color:#f87171;'>{item.get('policy_reason')}</small>" if item.get('policy_violation') else ""
+
             timeline_rows += f"""
             <tr>
                 <td><strong>#{item.get('event_id', '-')}</strong></td>
@@ -35,9 +67,10 @@ class ForensicReportGenerator:
                 <td><span class="source-tag">{item.get('source', '-')}</span></td>
                 <td><code>{item.get('command_type', '-')}</code></td>
                 <td>{item.get('entity_id', '-')}</td>
-                <td>{item.get('kill_chain_phase', '-')}</td>
+                <td>{item.get('kill_chain_phase', '-')}{policy_text}</td>
                 <td><span class="{badge_class}">{badge_text}</span></td>
                 <td class="hash-col" title="{item.get('onchain_hash', '')}"><code>{str(item.get('onchain_hash', ''))[:16]}...</code></td>
+                <td>{tx_link}</td>
             </tr>
             """
 
@@ -104,37 +137,57 @@ class ForensicReportGenerator:
             justify-content: space-between;
             align-items: flex-start;
             border-bottom: 2px solid var(--surface-border);
-            padding-bottom: 24px;
-            margin-bottom: 28px;
+            padding-bottom: 20px;
+            margin-bottom: 25px;
         }}
         .brand h1 {{
-            font-size: 26px;
-            letter-spacing: 0.5px;
+            font-size: 24px;
+            letter-spacing: 1px;
             color: #fff;
-            display: flex;
-            align-items: center;
-            gap: 10px;
         }}
         .brand h1 span {{ color: var(--accent-cyan); }}
         .meta-box {{
             text-align: right;
-            font-size: 13px;
+            font-size: 12px;
             color: var(--text-muted);
         }}
-        .meta-box strong {{ color: var(--text-main); }}
+        .mode-simulated {{
+            display: inline-block;
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--warning);
+            border: 1px solid var(--warning);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 11px;
+            margin-top: 6px;
+        }}
+        .mode-live {{
+            display: inline-block;
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success);
+            border: 1px solid var(--success);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 11px;
+            margin-top: 6px;
+        }}
         .alert-banner {{
-            padding: 16px 20px;
+            padding: 14px 18px;
             border-radius: 8px;
-            margin-bottom: 28px;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            font-size: 15px;
+            margin-bottom: 24px;
+            font-size: 13px;
         }}
         .alert-banner.danger {{
             background: rgba(239, 68, 68, 0.15);
             border: 1px solid var(--danger);
             color: #fca5a5;
+        }}
+        .alert-banner.warning {{
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid var(--warning);
+            color: #fde68a;
         }}
         .alert-banner.success {{
             background: rgba(16, 185, 129, 0.15);
@@ -142,104 +195,93 @@ class ForensicReportGenerator:
             color: #6ee7b7;
         }}
         h2 {{
-            font-size: 18px;
+            font-size: 16px;
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 0.5px;
             color: var(--accent-cyan);
-            margin: 28px 0 16px 0;
-            display: flex;
-            align-items: center;
-            gap: 8px;
+            margin: 30px 0 15px 0;
+            border-bottom: 1px solid #2d3748;
+            padding-bottom: 6px;
         }}
         .card-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
         }}
         .info-card {{
             background: #1e293b;
             border: 1px solid #334155;
+            padding: 16px;
             border-radius: 8px;
-            padding: 18px;
         }}
         .info-card .label {{
-            font-size: 12px;
-            text-transform: uppercase;
+            font-size: 11px;
             color: var(--text-muted);
-            margin-bottom: 6px;
+            text-transform: uppercase;
+            font-weight: 600;
         }}
         .info-card .value {{
             font-size: 18px;
-            font-weight: 600;
-            color: #fff;
+            font-weight: bold;
+            margin: 6px 0 2px 0;
         }}
         .info-card .sub {{
-            font-size: 12px;
+            font-size: 11px;
             color: var(--text-muted);
-            margin-top: 4px;
         }}
         table {{
             width: 100%;
             border-collapse: collapse;
-            font-size: 13px;
-            margin: 16px 0;
-            border-radius: 6px;
-            overflow: hidden;
+            font-size: 12px;
+            margin-bottom: 25px;
         }}
         table th, table td {{
-            padding: 12px 14px;
+            padding: 10px 12px;
+            border-bottom: 1px solid #1f293d;
             text-align: left;
         }}
         table th {{
             background: #1e293b;
             color: var(--text-muted);
             font-weight: 600;
-            border-bottom: 1px solid #334155;
+            font-size: 11px;
+            text-transform: uppercase;
         }}
-        table td {{
-            border-bottom: 1px solid #1e293b;
-        }}
-        table tr:hover td {{
-            background: rgba(255,255,255,0.02);
+        .tamper-badge {{
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 10px;
         }}
         .valid-badge {{
             background: rgba(16, 185, 129, 0.2);
             color: #34d399;
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: bold;
-        }}
-        .tamper-badge {{
-            background: rgba(239, 68, 68, 0.25);
-            color: #f87171;
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: bold;
-            animation: pulse 2s infinite;
-        }}
-        .source-tag {{
-            background: #334155;
             padding: 2px 6px;
             border-radius: 4px;
-            font-size: 11px;
+            font-weight: bold;
+            font-size: 10px;
         }}
-        .hash-col code {{
-            color: var(--accent-cyan);
+        .source-tag {{
             font-family: monospace;
+            font-size: 11px;
+            background: #0f172a;
+            padding: 2px 6px;
+            border-radius: 4px;
         }}
         .technique-grid {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 16px;
+            gap: 15px;
+            margin-bottom: 25px;
         }}
         .technique-card {{
             background: #1e293b;
             border: 1px solid #334155;
-            border-radius: 8px;
             padding: 16px;
+            border-radius: 8px;
         }}
         .tech-header {{
             display: flex;
@@ -302,18 +344,21 @@ class ForensicReportGenerator:
             <div class="brand">
                 <h1>IRON<span>LEDGER</span> FORENSIC REPORT</h1>
                 <p style="color: var(--text-muted); font-size: 13px;">Industrial Control Systems Immutable Evidence & Attribution Framework</p>
+                {mode_badge}
             </div>
             <div class="meta-box">
                 <div>Report ID: <strong>{report_id}</strong></div>
                 <div>Generated: <strong>{timestamp_str}</strong></div>
-                <div>Sepolia Contract: <strong>{contract_address[:8]}...{contract_address[-6:]}</strong></div>
+                <div>Contract Anchor: <strong>{contract_address[:8]}...{contract_address[-6:]}</strong></div>
                 <div style="margin-top: 10px;" class="no-print">
                     <button class="print-btn" onclick="window.print()">Print / Export PDF</button>
                 </div>
             </div>
         </div>
 
-        {"<div class='alert-banner danger'><strong>TAMPER DETECTED:</strong> Local database audit trail was illegally modified! IronLedger on-chain cryptographic anchor on Ethereum Sepolia preserved original authentic state.</div>" if tampered else "<div class='alert-banner success'><strong>BLOCKCHAIN INTEGRITY VERIFIED:</strong> Complete chain of custody matches on-chain cryptographic hashes with zero evidence degradation.</div>"}
+        {mode_banner}
+
+        {"<div class='alert-banner danger'><strong>TAMPER DETECTED:</strong> Off-chain database records deviate from the immutable SHA-256 state anchor. The forensic timeline below highlights tampered modifications.</div>" if tampered else "<div class='alert-banner success'><strong>BLOCKCHAIN INTEGRITY VERIFIED:</strong> Complete chain of custody matches cryptographic hashes with zero evidence degradation.</div>"}
 
         <h2>1. Executive Summary & Root Cause Attribution</h2>
         <div class="card-grid">
@@ -337,7 +382,7 @@ class ForensicReportGenerator:
             <strong>Forensic Determination:</strong> {root_cause.get('forensic_conclusion', 'Baseline inspection.')}
         </p>
 
-        <h2>2. Blockchain-Anchored Reconstructed Timeline</h2>
+        <h2>2. Cryptographically Anchored Reconstructed Timeline</h2>
         <table>
             <thead>
                 <tr>
@@ -346,9 +391,10 @@ class ForensicReportGenerator:
                     <th>Source Entity</th>
                     <th>Command</th>
                     <th>Target</th>
-                    <th>Kill-Chain Phase</th>
+                    <th>Kill-Chain Phase & Policy</th>
                     <th>Integrity Status</th>
-                    <th>On-Chain Hash</th>
+                    <th>Anchor Hash</th>
+                    <th>On-Chain Tx</th>
                 </tr>
             </thead>
             <tbody>
@@ -366,12 +412,12 @@ class ForensicReportGenerator:
             <div class="info-card">
                 <div class="label">Peak Pressure Vessel</div>
                 <div class="value">{telemetry_snapshot.get('pressure_vessel', {}).get('pressure_bar', 0)} Bar</div>
-                <div class="sub">Safe Limit: <= 8.0 Bar</div>
+                <div class="sub">Safe Max: <= 8.0 Bar</div>
             </div>
             <div class="info-card">
                 <div class="label">Peak Temperature</div>
                 <div class="value">{telemetry_snapshot.get('pressure_vessel', {}).get('temp_celsius', 0)} °C</div>
-                <div class="sub">Safe Limit: <= 85.0 °C</div>
+                <div class="sub">Safe Max: <= 85.0 °C</div>
             </div>
             <div class="info-card">
                 <div class="label">Pump A RPM & Vibration</div>
@@ -388,7 +434,7 @@ class ForensicReportGenerator:
         </div>
 
         <div class="footer">
-            <div>Digital Evidence Hash: <code>{str(root_cause.get('onchain_proof_tx', '0x948271048b'))}</code></div>
+            <div>Framework: <strong>IronLedger Digital Forensics</strong></div>
             <div>Investigating Officers: <strong>Simran & Garima</strong> | IronLedger Core</div>
         </div>
     </div>

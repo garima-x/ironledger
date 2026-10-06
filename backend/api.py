@@ -294,7 +294,8 @@ async def get_forensic_report():
         forensic_data=forensic_data,
         threat_intel=intel,
         telemetry_snapshot=snapshot,
-        contract_address=ledger.sepolia_contract_address
+        contract_address=ledger.sepolia_contract_address,
+        is_simulated=ledger.is_simulated
     )
     return HTMLResponse(content=html)
 

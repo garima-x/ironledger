@@ -2,7 +2,7 @@
 IronLedger - Supabase Database Layer
 Handles persistent storage of ICS events, blockchain blocks, and forensic cases.
 
-Tables required (run schema.sql in Supabase SQL Editor):
+Tables required (run supabase_schema.sql in Supabase SQL Editor):
   - ics_events         : off-chain ICS command log (the "mutable" DB that can be tampered)
   - blockchain_blocks  : mirror of the immutable ledger anchor blocks
   - forensic_cases     : saved forensic reconstruction results
@@ -19,14 +19,12 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger("ironledger.db")
 
-# Load .env if present
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # python-dotenv optional
+    pass
 
-# ── Try importing supabase ────────────────────────────────────────────────────
 try:
     from supabase import create_client, Client
     _SUPABASE_AVAILABLE = True
@@ -54,10 +52,7 @@ class SupabaseDatabase:
         key = os.getenv("SUPABASE_KEY", "").strip()
 
         if not url or not key or "your-project" in url:
-            logger.warning(
-                "SUPABASE_URL / SUPABASE_KEY not configured — "
-                "running in memory-only mode. Copy .env.example → .env and fill in your credentials."
-            )
+            logger.info("Running in local session mode. Add SUPABASE_URL & SUPABASE_KEY to .env for cloud persistence.")
             return
 
         if not _SUPABASE_AVAILABLE:
@@ -80,20 +75,21 @@ class SupabaseDatabase:
     def upsert_event(self, event: Dict[str, Any]) -> bool:
         """
         Persist a single ICS command event to the `ics_events` table.
-        Serialises the nested `parameters` and `plant_state_snapshot` dicts to JSON strings
-        so they fit cleanly in Postgres columns.
         """
         if not self._enabled:
             return False
         try:
+            raw_ts = float(event.get("timestamp", time.time()))
             row = {
-                "event_id":            event.get("event_id"),
-                "timestamp":           event.get("timestamp"),
-                "source":              event.get("source", "UNKNOWN"),
-                "command_type":        event.get("command_type", "UNKNOWN"),
-                "entity_id":           event.get("entity_id", "UNKNOWN"),
-                "parameters":          json.dumps(event.get("parameters", {})),
+                "event_id":             event.get("event_id"),
+                "timestamp":            raw_ts,
+                "timestamp_ms":         int(raw_ts * 1000),
+                "source":               event.get("source", "UNKNOWN"),
+                "command_type":         event.get("command_type", "UNKNOWN"),
+                "entity_id":            event.get("entity_id", "UNKNOWN"),
+                "parameters":           json.dumps(event.get("parameters", {})),
                 "plant_state_snapshot": json.dumps(event.get("plant_state_snapshot", {})),
+                "signature":            event.get("signature"),
             }
             self._client.table("ics_events").upsert(row, on_conflict="event_id").execute()
             return True
@@ -104,7 +100,6 @@ class SupabaseDatabase:
     def load_events(self) -> List[Dict[str, Any]]:
         """
         Restore the full ICS event log from Supabase (used on server startup).
-        Returns a list ready to replace / seed simulator.event_log.
         """
         if not self._enabled:
             return []
@@ -115,11 +110,13 @@ class SupabaseDatabase:
                 events.append({
                     "event_id":             row["event_id"],
                     "timestamp":            row["timestamp"],
+                    "timestamp_ms":         row.get("timestamp_ms") or int(row["timestamp"] * 1000),
                     "source":               row["source"],
                     "command_type":         row["command_type"],
                     "entity_id":            row["entity_id"],
                     "parameters":           json.loads(row.get("parameters") or "{}"),
                     "plant_state_snapshot": json.loads(row.get("plant_state_snapshot") or "{}"),
+                    "signature":            row.get("signature"),
                 })
             logger.info(f"Loaded {len(events)} ICS events from Supabase.")
             return events
@@ -142,16 +139,18 @@ class SupabaseDatabase:
         """
         Directly patches a single field in the `ics_events` row — simulates
         an attacker altering the off-chain database to hide malicious activity.
-        Only `source`, `command_type`, `entity_id`, and `parameters` are patchable.
         """
         if not self._enabled:
             return False
-        ALLOWED = {"source", "command_type", "entity_id", "parameters"}
+        ALLOWED = {"source", "command_type", "entity_id", "parameters", "timestamp", "plant_state_snapshot"}
         if field not in ALLOWED:
             logger.warning(f"tamper_event_field: field '{field}' not patchable.")
             return False
         try:
-            patch_value = json.dumps(value) if field == "parameters" else value
+            if field in ["parameters", "plant_state_snapshot"]:
+                patch_value = json.dumps(value) if isinstance(value, (dict, list)) else value
+            else:
+                patch_value = value
             self._client.table("ics_events").update({field: patch_value}).eq("event_id", event_id).execute()
             return True
         except Exception as exc:
@@ -171,6 +170,7 @@ class SupabaseDatabase:
                 "event_hash":     block.get("event_hash"),
                 "previous_hash":  block.get("previous_hash"),
                 "timestamp":      block.get("timestamp"),
+                "timestamp_ms":   block.get("timestamp_ms"),
                 "source":         block.get("source", "UNKNOWN"),
                 "command_type":   block.get("command_type", "UNKNOWN"),
                 "entity_id":      block.get("entity_id", "UNKNOWN"),
@@ -178,6 +178,7 @@ class SupabaseDatabase:
                 "block_number":   block.get("block_number"),
                 "recorded_by":    block.get("recorded_by"),
                 "status":         block.get("status", "CONFIRMED_ON_CHAIN"),
+                "is_simulated":   block.get("is_simulated", True),
                 "etherscan_url":  block.get("etherscan_url"),
             }
             self._client.table("blockchain_blocks").upsert(row, on_conflict="block_index").execute()
@@ -197,6 +198,19 @@ class SupabaseDatabase:
             logger.error(f"load_blocks failed: {exc}")
             return []
 
+    def clear_all_tables(self) -> bool:
+        """Truncate all events and blocks to migrate or reset clean state."""
+        if not self._enabled:
+            return False
+        try:
+            self._client.table("blockchain_blocks").delete().neq("block_index", -1).execute()
+            self._client.table("ics_events").delete().neq("event_id", -1).execute()
+            logger.info("Cleared all events and blocks from Supabase.")
+            return True
+        except Exception as exc:
+            logger.error(f"clear_all_tables failed: {exc}")
+            return False
+
     # ── Forensic Cases ────────────────────────────────────────────────────────
 
     def save_case(
@@ -208,52 +222,50 @@ class SupabaseDatabase:
         telemetry_snapshot: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
-        Persists a completed forensic reconstruction as a named investigation case.
-        Returns the inserted row (including auto-generated id) or None on failure.
+        Save a complete forensic reconstruction as a named case row in `forensic_cases`.
         """
         if not self._enabled:
             return None
+
+        root_cause = reconstruction.get("root_cause_artifact", {})
+        actor = threat_intel.get("primary_hypothesis", {})
+
+        row = {
+            "case_name":           case_name,
+            "attack_scenario":      attack_scenario,
+            "events_analyzed":      reconstruction.get("events_analyzed", 0),
+            "tamper_detected":      reconstruction.get("tamper_detected", False),
+            "tampered_records":     reconstruction.get("tampered_records_count", 0),
+            "root_cause_source":    root_cause.get("source_identity"),
+            "root_cause_command":   root_cause.get("entry_command"),
+            "root_cause_entity":    root_cause.get("target_entity"),
+            "forensic_conclusion":  root_cause.get("forensic_conclusion"),
+            "attribution_actor":    actor.get("name"),
+            "confidence_score":     float(actor.get("confidence_score", 0)),
+            "mitre_techniques":     json.dumps(threat_intel.get("matched_techniques", [])),
+            "timeline":             json.dumps(reconstruction.get("timeline", [])),
+            "threat_intel":         json.dumps(threat_intel),
+            "telemetry_snapshot":   json.dumps(telemetry_snapshot),
+        }
+
         try:
-            root = reconstruction.get("root_cause_artifact", {})
-            row = {
-                "case_name":           case_name,
-                "attack_scenario":     attack_scenario or "UNKNOWN",
-                "created_at":          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "events_analyzed":     reconstruction.get("events_analyzed", 0),
-                "tamper_detected":     reconstruction.get("tamper_detected", False),
-                "tampered_records":    reconstruction.get("tampered_records_count", 0),
-                "root_cause_source":   root.get("source_identity", "Unknown"),
-                "root_cause_command":  root.get("entry_command", "Unknown"),
-                "root_cause_entity":   root.get("target_entity", "Unknown"),
-                "forensic_conclusion": root.get("forensic_conclusion", ""),
-                "attribution_actor":   threat_intel.get("attribution", {}).get("primary_actor", "Unknown"),
-                "confidence_score":    threat_intel.get("attribution", {}).get("confidence_score", 0),
-                "mitre_techniques":    json.dumps(threat_intel.get("matched_techniques", [])),
-                "timeline":            json.dumps(reconstruction.get("timeline", [])),
-                "threat_intel":        json.dumps(threat_intel),
-                "telemetry_snapshot":  json.dumps(telemetry_snapshot),
-            }
             resp = self._client.table("forensic_cases").insert(row).execute()
-            saved = resp.data[0] if resp.data else row
-            logger.info(f"Forensic case saved: '{case_name}' (id={saved.get('id', '?')})")
-            return saved
+            if resp.data:
+                logger.info(f"✅ Saved forensic case '{case_name}' to Supabase (id={resp.data[0]['id']}).")
+                return resp.data[0]
+            return None
         except Exception as exc:
             logger.error(f"save_case failed: {exc}")
             return None
 
     def get_all_cases(self) -> List[Dict[str, Any]]:
-        """Returns all forensic cases, newest first."""
+        """Fetch all saved forensic cases (newest first)."""
         if not self._enabled:
             return []
         try:
             resp = (
                 self._client.table("forensic_cases")
-                .select(
-                    "id, case_name, attack_scenario, created_at, events_analyzed, "
-                    "tamper_detected, tampered_records, root_cause_source, root_cause_command, "
-                    "root_cause_entity, forensic_conclusion, attribution_actor, "
-                    "confidence_score, mitre_techniques"
-                )
+                .select("id, case_name, attack_scenario, created_at, events_analyzed, tamper_detected, attribution_actor, confidence_score, root_cause_command")
                 .order("created_at", desc=True)
                 .execute()
             )
@@ -263,19 +275,25 @@ class SupabaseDatabase:
             return []
 
     def get_case(self, case_id: int) -> Optional[Dict[str, Any]]:
-        """Returns a single forensic case by its auto-generated id (full detail)."""
+        """Fetch the full detail of a single case by ID."""
         if not self._enabled:
             return None
         try:
-            resp = self._client.table("forensic_cases").select("*").eq("id", case_id).execute()
-            if resp.data:
-                row = resp.data[0]
-                # Deserialise JSON columns
-                for col in ("timeline", "threat_intel", "telemetry_snapshot", "mitre_techniques"):
-                    if isinstance(row.get(col), str):
-                        row[col] = json.loads(row[col])
-                return row
-            return None
+            resp = (
+                self._client.table("forensic_cases")
+                .select("*")
+                .eq("id", case_id)
+                .single()
+                .execute()
+            )
+            if not resp.data:
+                return None
+            c = resp.data
+            c["mitre_techniques"]   = json.loads(c.get("mitre_techniques") or "[]")
+            c["timeline"]           = json.loads(c.get("timeline") or "[]")
+            c["threat_intel"]       = json.loads(c.get("threat_intel") or "{}")
+            c["telemetry_snapshot"] = json.loads(c.get("telemetry_snapshot") or "{}")
+            return c
         except Exception as exc:
             logger.error(f"get_case({case_id}) failed: {exc}")
             return None
