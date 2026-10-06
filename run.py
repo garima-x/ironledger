@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8080"))
-    contract = os.environ.get("SEPOLIA_CONTRACT_ADDRESS", "0x91FB25541e11512E441Ebb980f0EADad8cD81a6A")
+    contract = os.environ.get("SEPOLIA_CONTRACT_ADDRESS", "NOT_CONFIGURED (Simulated Mode)")
 
     print("================================================================")
     print(" 🛡️  IRONLEDGER: ICS Digital Forensics & Blockchain Framework")
