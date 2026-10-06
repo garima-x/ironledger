@@ -60,14 +60,20 @@ class ForensicReportGenerator:
 
             policy_text = f"<br><small style='color:#f87171;'>{item.get('policy_reason')}</small>" if item.get('policy_violation') else ""
 
+            import html
+            src = html.escape(str(item.get('source', '-')))
+            cmd = html.escape(str(item.get('command_type', '-')))
+            ent = html.escape(str(item.get('entity_id', '-')))
+            phase = html.escape(str(item.get('kill_chain_phase', '-')))
+
             timeline_rows += f"""
             <tr>
                 <td><strong>#{item.get('event_id', '-')}</strong></td>
                 <td>{item.get('formatted_time', '-')}</td>
-                <td><span class="source-tag">{item.get('source', '-')}</span></td>
-                <td><code>{item.get('command_type', '-')}</code></td>
-                <td>{item.get('entity_id', '-')}</td>
-                <td>{item.get('kill_chain_phase', '-')}{policy_text}</td>
+                <td><span class="source-tag">{src}</span></td>
+                <td><code>{cmd}</code></td>
+                <td>{ent}</td>
+                <td>{phase}{policy_text}</td>
                 <td><span class="{badge_class}">{badge_text}</span></td>
                 <td class="hash-col" title="{item.get('onchain_hash', '')}"><code>{str(item.get('onchain_hash', ''))[:16]}...</code></td>
                 <td>{tx_link}</td>

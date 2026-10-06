@@ -21,9 +21,11 @@ except ImportError:
 
 
 def _canonicalize_value(val: Any) -> Any:
-    """Recursively cleans and rounds floats to prevent float representation serialization drift."""
-    if isinstance(val, float):
-        return round(val, 3)
+    """Recursively cleans and rounds numbers to floats to prevent int/float serialization drift."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (float, int)):
+        return round(float(val), 3)
     if isinstance(val, dict):
         return {k: _canonicalize_value(v) for k, v in sorted(val.items())}
     if isinstance(val, list):
@@ -264,8 +266,8 @@ class BlockchainLedger:
             return {
                 "contract_connected": False,
                 "mode": "SIMULATION",
-                "verified": True,
-                "note": "Running in local cryptographic simulation mode."
+                "verified": False,
+                "note": "On-chain verification unavailable: Running in local cryptographic simulation mode."
             }
 
         try:

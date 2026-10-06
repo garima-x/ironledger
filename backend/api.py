@@ -100,12 +100,11 @@ def startup_restore():
                 if blk.get("block_index", 0) == 0:
                     continue  # skip genesis duplicate
                 ledger.chain.append(blk)
-                if blk.get("event_hash"):
-                    ledger.hash_index[blk["event_hash"]] = blk
             if blocks:
                 ledger.latest_sepolia_block = max(
                     b.get("block_number", ledger.latest_sepolia_block) for b in blocks
                 )
+            ledger._immutable_anchor_mirror = [dict(b) for b in ledger.chain]
         print(f"✅ Restored {len(persisted)} events and {len(ledger.chain)-1} blocks from Supabase.")
     else:
         print("ℹ️  No persisted session found — seeding fresh baseline.")

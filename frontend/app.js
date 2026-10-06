@@ -240,9 +240,9 @@ function renderRecentBlocks(blocks) {
             <td class="block-tag">#${b.block_number}</td>
             <td><strong>#${b.event_id}</strong></td>
             <td>${dateStr}</td>
-            <td><code>${b.command_type}</code></td>
-            <td><span style="color:#94a3b8">${b.source}</span></td>
-            <td><a href="${b.etherscan_url || '#'}" target="_blank" class="hash-link" title="${b.event_hash}">${hashDisplay}</a></td>
+            <td><code>${esc(b.command_type || "")}</code></td>
+            <td><span style="color:#94a3b8">${esc(b.source || "")}</span></td>
+            <td><a href="${b.etherscan_url || '#'}" target="_blank" class="hash-link" title="${esc(b.event_hash || "")}">${esc(hashDisplay)}</a></td>
             <td><span class="status-chip anchored">ANCHORED</span></td>
         </tr>
         `;
