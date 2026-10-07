@@ -274,6 +274,50 @@ async def get_threat_intel():
     )
     return intel
 
+@app.get("/api/threat-intel/matrix")
+async def get_mitre_matrix():
+    """Returns the full MITRE ATT&CK for ICS matrix with live technique activation based on current incident state."""
+    snapshot = simulator.get_telemetry_snapshot()
+    anomaly_status = detector.evaluate_telemetry(snapshot)
+    audit = ledger.audit_entire_chain(simulator.event_log)
+    tampered = not audit["integrity_healthy"]
+
+    intel = threat_intel.correlate_incident(
+        command_history=simulator.event_log,
+        anomaly_details=anomaly_status,
+        tampered_detected=tampered
+    )
+    active_ids = {t["id"] for t in intel.get("matched_techniques", [])}
+
+    # Build matrix organized by tactic
+    all_tactics = [
+        "Initial Access", "Execution", "Persistence", "Evasion",
+        "Discovery", "Lateral Movement", "Collection",
+        "Command and Control", "Inhibit Response Function",
+        "Impair Process Control", "Impact"
+    ]
+    matrix = {tactic: [] for tactic in all_tactics}
+    for tech_id, tech in threat_intel.techniques.items():
+        tactic = tech.get("tactic", "Impact")
+        if tactic not in matrix:
+            matrix[tactic] = []
+        matrix[tactic].append({
+            "id": tech_id,
+            "name": tech["name"],
+            "description": tech["description"],
+            "mitigation": tech["mitigation"],
+            "active": tech_id in active_ids
+        })
+
+    return {
+        "tactics": all_tactics,
+        "matrix": matrix,
+        "active_technique_ids": list(active_ids),
+        "attribution": intel.get("primary_hypothesis"),
+        "attribution_ranking": intel.get("attribution_ranking", []),
+        "correlation_summary": intel.get("correlation_summary", "")
+    }
+
 @app.get("/api/report/html", response_class=HTMLResponse)
 async def get_forensic_report():
     """Generates court-ready HTML forensic incident report with cryptographic validation."""

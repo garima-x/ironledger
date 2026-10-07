@@ -412,6 +412,59 @@
         </section>
     </main>
 
+    <!-- ── MITRE ATT&CK for ICS Matrix ──────────────────────── -->
+    <section class="mitre-section" id="mitre-section">
+        <div class="mitre-header">
+            <div class="mitre-title-group">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <div>
+                    <h2 class="mitre-title">MITRE ATT&amp;CK for ICS — Live Navigator Matrix</h2>
+                    <p class="mitre-subtitle">Real-time technique activation mapped from SCADA telemetry, commands &amp; anomalies. Red cells = techniques detected in current incident.</p>
+                </div>
+            </div>
+            <div class="mitre-header-actions">
+                <button class="mitre-refresh-btn" onclick="loadMitreMatrix()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                    Refresh Matrix
+                </button>
+            </div>
+        </div>
+
+        <!-- Tab Nav -->
+        <div class="mitre-tabs">
+            <button class="mitre-tab active" id="tab-matrix" onclick="switchMitreTab('matrix')">🛡️ ATT&amp;CK Matrix</button>
+            <button class="mitre-tab" id="tab-attribution" onclick="switchMitreTab('attribution')">🎯 Attribution Ranking</button>
+            <button class="mitre-tab" id="tab-techniques" onclick="switchMitreTab('techniques')">📋 Technique Details</button>
+        </div>
+
+        <!-- Matrix Tab -->
+        <div id="mitre-tab-matrix" class="mitre-tab-content">
+            <div class="mitre-legend">
+                <span class="legend-item"><span class="legend-dot active-dot"></span> Active in current incident</span>
+                <span class="legend-item"><span class="legend-dot inactive-dot"></span> Not observed</span>
+            </div>
+            <div class="mitre-matrix-scroll">
+                <div class="mitre-matrix" id="mitre-matrix-grid">
+                    <div class="mitre-loading">Loading MITRE ATT&amp;CK matrix...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Attribution Ranking Tab -->
+        <div id="mitre-tab-attribution" class="mitre-tab-content hidden">
+            <div class="attribution-ranking" id="attribution-ranking-list">
+                <div class="mitre-loading">Run a scenario to see attribution scores.</div>
+            </div>
+        </div>
+
+        <!-- Technique Details Tab -->
+        <div id="mitre-tab-techniques" class="mitre-tab-content hidden">
+            <div class="techniques-list" id="techniques-detail-list">
+                <div class="mitre-loading">Loading technique library...</div>
+            </div>
+        </div>
+    </section>
+
     <!-- ── Forensic Cases Database Browser ─────────────────────── -->
     <section class="cases-section" id="cases-section">
         <div class="cases-header">

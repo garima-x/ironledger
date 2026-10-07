@@ -1469,3 +1469,341 @@ code, .font-mono, th, td, .hash-col, .ml-score-container, .metric-card .val {
     border-color: rgba(239,68,68,0.3);
     color: #ef4444;
 }
+
+/* ── MITRE ATT&CK for ICS Navigator Matrix ──────────────────── */
+.mitre-section {
+    margin: 0 24px 32px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    border-radius: 14px;
+    overflow: hidden;
+}
+
+.mitre-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px 16px;
+    border-bottom: 1px solid var(--border-card);
+}
+
+.mitre-title-group {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+}
+
+.mitre-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: 0.3px;
+}
+
+.mitre-subtitle {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 3px;
+}
+
+.mitre-refresh-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    color: #f59e0b;
+    padding: 7px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.mitre-refresh-btn:hover {
+    background: rgba(245, 158, 11, 0.22);
+    box-shadow: 0 0 14px rgba(245, 158, 11, 0.25);
+}
+
+/* Tabs */
+.mitre-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border-card);
+    padding: 0 24px;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.mitre-tab {
+    padding: 12px 20px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.mitre-tab:hover { color: var(--text-primary); }
+.mitre-tab.active {
+    color: #f59e0b;
+    border-bottom-color: #f59e0b;
+}
+
+.mitre-tab-content { display: block; }
+.mitre-tab-content.hidden { display: none; }
+
+/* Legend */
+.mitre-legend {
+    display: flex;
+    gap: 20px;
+    padding: 12px 24px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 3px;
+}
+.active-dot { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,0.6); }
+.inactive-dot { background: #1e2942; border: 1px solid #334155; }
+
+/* Matrix Scroll Container */
+.mitre-matrix-scroll {
+    overflow-x: auto;
+    padding: 0 24px 24px;
+}
+
+/* Navigator Grid */
+.mitre-matrix {
+    display: flex;
+    gap: 12px;
+    min-width: max-content;
+    padding-top: 4px;
+}
+
+.mitre-tactic-col {
+    min-width: 160px;
+    max-width: 180px;
+}
+
+.mitre-tactic-header {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-secondary);
+    padding: 8px 10px;
+    background: rgba(30, 41, 59, 0.6);
+    border: 1px solid var(--border-card);
+    border-bottom: 2px solid #1e3a5f;
+    border-radius: 6px 6px 0 0;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mitre-technique-cell {
+    padding: 8px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #0d1527;
+    border: 1px solid #1e2942;
+    border-top: none;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: var(--text-secondary);
+    position: relative;
+    overflow: hidden;
+}
+.mitre-technique-cell:last-child { border-radius: 0 0 6px 6px; }
+.mitre-technique-cell:hover {
+    background: #131d35;
+    color: var(--text-primary);
+    border-color: #334155;
+    z-index: 2;
+}
+
+.mitre-technique-cell.active {
+    background: rgba(239, 68, 68, 0.18);
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #fca5a5;
+}
+.mitre-technique-cell.active::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: #ef4444;
+    box-shadow: 0 0 6px rgba(239,68,68,0.6);
+}
+
+.technique-cell-id {
+    font-size: 9px;
+    font-family: 'JetBrains Mono', monospace;
+    color: inherit;
+    opacity: 0.7;
+    display: block;
+}
+
+.mitre-loading {
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 32px;
+    text-align: center;
+}
+
+/* Tooltip */
+.mitre-technique-cell .cell-tooltip {
+    display: none;
+    position: absolute;
+    z-index: 100;
+    bottom: calc(100% + 6px);
+    left: 0;
+    min-width: 260px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 12px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.7);
+    pointer-events: none;
+    white-space: normal;
+}
+.mitre-technique-cell:hover .cell-tooltip { display: block; }
+.cell-tooltip-id { font-size: 11px; color: #f59e0b; font-family: monospace; font-weight: 700; }
+.cell-tooltip-name { font-size: 13px; color: #f8fafc; font-weight: 700; margin: 4px 0; }
+.cell-tooltip-desc { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+.cell-tooltip-mit { font-size: 10px; color: #10b981; margin-top: 6px; padding-top: 6px; border-top: 1px solid #1e2942; }
+
+/* Attribution Ranking Tab */
+.attribution-ranking {
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.actor-rank-card {
+    background: #0d1527;
+    border: 1px solid var(--border-card);
+    border-radius: 10px;
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: 40px 1fr auto;
+    gap: 16px;
+    align-items: center;
+    transition: all 0.2s;
+}
+.actor-rank-card:hover { border-color: #334155; }
+.actor-rank-card.top-actor {
+    border-color: rgba(239,68,68,0.4);
+    background: rgba(239,68,68,0.06);
+}
+
+.actor-rank-num {
+    font-size: 22px;
+    font-weight: 900;
+    color: var(--text-muted);
+    text-align: center;
+}
+.actor-rank-card.top-actor .actor-rank-num { color: #ef4444; }
+
+.actor-rank-name {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.actor-rank-origin {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 3px;
+}
+.actor-rank-techniques {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+.actor-rank-score {
+    font-size: 28px;
+    font-weight: 900;
+    text-align: right;
+}
+.score-bar-wrap {
+    width: 120px;
+    height: 5px;
+    background: #1e2942;
+    border-radius: 4px;
+    margin-top: 4px;
+}
+.score-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.6s ease;
+}
+
+/* Technique Details Tab */
+.techniques-list {
+    padding: 20px 24px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+}
+.technique-detail-card {
+    background: #0d1527;
+    border: 1px solid var(--border-card);
+    border-radius: 10px;
+    padding: 16px;
+    transition: all 0.2s;
+    position: relative;
+    overflow: hidden;
+}
+.technique-detail-card.active {
+    border-color: rgba(239,68,68,0.45);
+    background: rgba(239,68,68,0.06);
+}
+.technique-detail-card.active::after {
+    content: '⚡ ACTIVE';
+    position: absolute;
+    top: 12px; right: 12px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #ef4444;
+    background: rgba(239,68,68,0.15);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+.technique-detail-card:hover { border-color: #334155; }
+.tech-detail-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: #f59e0b;
+    margin-bottom: 4px;
+}
+.tech-detail-name {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+}
+.tech-detail-tactic {
+    font-size: 11px;
+    color: #06b6d4;
+    margin-bottom: 8px;
+}
+.tech-detail-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 10px;
+}
+.tech-detail-mit {
+    font-size: 11px;
+    color: #10b981;
+    padding-top: 8px;
+    border-top: 1px solid #1e2942;
+    line-height: 1.5;
+}

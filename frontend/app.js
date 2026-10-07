@@ -18,6 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchBlockchainBlocks();
     checkDbStatus();
     loadCases();
+    loadMitreMatrix();
 });
 
 // Telemetry Polling Loop
@@ -714,4 +715,115 @@ function esc(str) {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+}
+
+// ── MITRE ATT&CK Matrix Logic ──────────────────────────────────────────────────
+function switchMitreTab(tabId) {
+    document.querySelectorAll('.mitre-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.mitre-tab-content').forEach(c => c.classList.add('hidden'));
+    
+    document.getElementById(`tab-${tabId}`).classList.add('active');
+    document.getElementById(`mitre-tab-${tabId}`).classList.remove('hidden');
+}
+
+async function loadMitreMatrix() {
+    try {
+        const res = await fetch("/api/threat-intel/matrix");
+        if (!res.ok) throw new Error("Failed to load MITRE matrix");
+        const data = await res.json();
+        
+        renderMitreMatrix(data);
+        renderAttributionRanking(data.attribution_ranking);
+        renderTechniqueDetails(data.matrix, data.active_technique_ids);
+    } catch (err) {
+        console.error("MITRE Matrix error:", err);
+    }
+}
+
+function renderMitreMatrix(data) {
+    const grid = document.getElementById("mitre-matrix-grid");
+    if (!data.matrix || data.tactics.length === 0) {
+        grid.innerHTML = '<div class="mitre-loading">Matrix data unavailable.</div>';
+        return;
+    }
+    
+    let html = '';
+    data.tactics.forEach(tactic => {
+        const techniques = data.matrix[tactic] || [];
+        html += `<div class="mitre-tactic-col">`;
+        html += `<div class="mitre-tactic-header" title="${esc(tactic)}">${esc(tactic)}</div>`;
+        
+        techniques.forEach(tech => {
+            const activeClass = tech.active ? 'active' : '';
+            html += `
+            <div class="mitre-technique-cell ${activeClass}">
+                <span class="technique-cell-id">${esc(tech.id)}</span>
+                ${esc(tech.name)}
+                <div class="cell-tooltip">
+                    <div class="cell-tooltip-id">${esc(tech.id)}</div>
+                    <div class="cell-tooltip-name">${esc(tech.name)}</div>
+                    <div class="cell-tooltip-desc">${esc(tech.description)}</div>
+                    <div class="cell-tooltip-mit">Mitigation: ${esc(tech.mitigation)}</div>
+                </div>
+            </div>`;
+        });
+        html += `</div>`;
+    });
+    grid.innerHTML = html;
+}
+
+function renderAttributionRanking(ranking) {
+    const list = document.getElementById("attribution-ranking-list");
+    if (!ranking || ranking.length === 0) {
+        list.innerHTML = '<div class="mitre-loading">No attribution data generated yet. Run an attack scenario.</div>';
+        return;
+    }
+    
+    list.innerHTML = ranking.map((actor, idx) => {
+        const isTop = idx === 0;
+        return `
+        <div class="actor-rank-card ${isTop ? 'top-actor' : ''}">
+            <div class="actor-rank-num">#${idx + 1}</div>
+            <div>
+                <div class="actor-rank-name">${esc(actor.name)}</div>
+                <div class="actor-rank-origin">${esc(actor.origin)} &bull; Targets: ${esc(actor.target_sectors.join(", "))}</div>
+                <div class="actor-rank-techniques">Matches: ${esc(actor.matched_signature_techniques.join(", ") || "None")}</div>
+            </div>
+            <div class="actor-rank-score">
+                ${actor.confidence_score}%
+                <div class="score-bar-wrap">
+                    <div class="score-bar-fill" style="width: ${actor.confidence_score}%; background: ${isTop ? '#ef4444' : '#38bdf8'}"></div>
+                </div>
+            </div>
+        </div>
+        `;
+    }).join("");
+}
+
+function renderTechniqueDetails(matrix, activeIds) {
+    const list = document.getElementById("techniques-detail-list");
+    let allTechs = [];
+    Object.keys(matrix).forEach(tactic => {
+        matrix[tactic].forEach(tech => {
+            allTechs.push({...tech, tactic});
+        });
+    });
+    
+    // Sort active ones first
+    allTechs.sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0));
+    
+    if (allTechs.length === 0) {
+        list.innerHTML = '<div class="mitre-loading">No techniques available.</div>';
+        return;
+    }
+    
+    list.innerHTML = allTechs.map(tech => `
+        <div class="technique-detail-card ${tech.active ? 'active' : ''}">
+            <div class="tech-detail-id">${esc(tech.id)}</div>
+            <div class="tech-detail-name">${esc(tech.name)}</div>
+            <div class="tech-detail-tactic">Tactic: ${esc(tech.tactic)}</div>
+            <div class="tech-detail-desc">${esc(tech.description)}</div>
+            <div class="tech-detail-mit">🛡️ ${esc(tech.mitigation)}</div>
+        </div>
+    `).join("");
 }
