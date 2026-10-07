@@ -168,6 +168,7 @@ class ForensicReconstructionEngine:
                         "command_type": cmd_type,
                         "entity_id": entity_id,
                         "parameters": block_params,
+                        "signature": block.get("signature") or db_ev.get("signature"),
                         "plant_state_snapshot": db_ev.get("plant_state_snapshot", {}),
                     }
                     try:

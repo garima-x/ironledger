@@ -343,6 +343,30 @@ def test_tampered_parameters_correlate_and_report_resilience():
         assert isinstance(html_report, str) and len(html_report) > 0
 
 
+def test_signature_tampering_detection(ledger):
+    """Ensures that altering an event's HMAC signature in off-chain DB triggers a hash mismatch."""
+    import copy
+    event = {
+        "event_id": 1,
+        "timestamp": 1700000000.0,
+        "source": "AUTHORIZED_ENG_01",
+        "command_type": "SET_RPM",
+        "entity_id": "PUMP_A_01",
+        "parameters": {"rpm": 3000.0},
+        "signature": "hmac_sha256_signature_abc123"
+    }
+    ledger.anchor_event(event)
+
+    # Tamper the signature in the off-chain database
+    tampered_event = copy.deepcopy(event)
+    tampered_event["signature"] = "forged_hmac_signature_xyz789"
+
+    audit = ledger.audit_entire_chain([tampered_event])
+    assert not audit["integrity_healthy"]
+    assert audit["tampered_blocks_found"] == 1
+    assert audit["audit_details"][0]["reason"] == "HASH_MISMATCH"
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print(" 🧪 RUNNING IRONLEDGER AUTOMATED TEST SUITE")
@@ -351,6 +375,7 @@ if __name__ == "__main__":
     tests = [
         ("Canonical Hashing Determinism", lambda: test_canonical_hashing_determinism(BlockchainLedger())),
         ("Timestamp Tamper Detection", lambda: test_timestamp_tampering_detection(BlockchainLedger())),
+        ("Signature Tamper Detection", lambda: test_signature_tampering_detection(BlockchainLedger())),
         ("Snapshot State Tamper Detection", lambda: test_snapshot_tampering_detection(BlockchainLedger())),
         ("Broken Chain Link Detection", lambda: test_broken_chain_link_detection(BlockchainLedger())),
         ("Unanchored Record Detection", lambda: test_unanchored_db_record_detection(BlockchainLedger())),

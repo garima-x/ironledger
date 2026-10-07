@@ -215,6 +215,7 @@ class BlockchainLedger:
             "command_type": str(event.get("command_type", "")),
             "entity_id": str(event.get("entity_id", "")),
             "parameters": _canonicalize_value(event.get("parameters", {})),
+            "signature": str(event.get("signature") or ""),
             "snapshot_sha256": snap_hash,
             "previous_hash": previous_hash
         }
@@ -247,6 +248,7 @@ class BlockchainLedger:
             "command_type": str(event.get("command_type", "TELEMETRY_SNAPSHOT")),
             "entity_id": str(event.get("entity_id", "PLANT")),
             "parameters": event.get("parameters", {}),
+            "signature": event.get("signature"),
             "tx_hash": None,
             "block_number": None,
             "recorded_by": recorded_by,

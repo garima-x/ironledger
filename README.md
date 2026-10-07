@@ -47,7 +47,7 @@ pytest backend/test_pipeline.py -v
 2. **Blockchain Evidence Layer ([`contracts/IronLedger.sol`](contracts/IronLedger.sol), [`backend/blockchain.py`](backend/blockchain.py))**:
    - Solidity 0.8.20 smart contract deployed for Ethereum Sepolia testnet with `onlyOwner` access control, strict `previousHash` linkage checks, duplicate replay protection, and storage optimization.
    - Computes deterministic SHA-256 state hashes:
-     $$H_i = \text{SHA256}(\text{canonical\_json}(\{ \text{event\_id}, \text{timestamp\_ms}, \text{source}, \text{cmd}, \text{entity}, \text{params}, \text{snapshot\_hash}, H_{i-1} \}))$$
+     $$H_i = \text{SHA256}(\text{canonical\_json}(\{ \text{event\_id}, \text{timestamp\_ms}, \text{source}, \text{cmd}, \text{entity}, \text{params}, \text{signature}, \text{snapshot\_hash}, H_{i-1} \}))$$
    - **Dual-Mode Operation:** Automatically broadcasts transactions to Ethereum Sepolia when Web3 credentials are configured in `.env`, and gracefully operates in a local cryptographic SHA-256 simulation mode when running offline.
 
 3. **Dual-Layer Anomaly Detection ([`backend/anomaly_detector.py`](backend/anomaly_detector.py))**:
