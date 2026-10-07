@@ -116,7 +116,8 @@ class ThreatIntelligenceEngine:
         for cmd in command_history:
             cmd_type = str(cmd.get("command_type", ""))
             source = str(cmd.get("source", ""))
-            params = cmd.get("parameters", {})
+            raw_params = cmd.get("parameters")
+            params = raw_params if isinstance(raw_params, dict) else {}
 
             if "OVERRIDE_SIS" in cmd_type or params.get("bypass"):
                 identified_tech_ids.add("T0888")  # Loss of Safety

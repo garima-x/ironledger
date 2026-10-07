@@ -312,6 +312,37 @@ def test_malformed_db_record_handling():
         assert isinstance(html_report, str) and len(html_report) > 0, f"HTML report generation failed for {field}={val}"
 
 
+def test_tampered_parameters_correlate_and_report_resilience():
+    """Verifies that correlate_incident and HTML report generator handle non-dict parameters ('abc', None, [1,2]) without raising exceptions."""
+    import copy
+    from report_generator import ForensicReportGenerator
+    from threat_intel import ThreatIntelligenceEngine
+
+    report_gen = ForensicReportGenerator()
+    intel_engine = ThreatIntelligenceEngine()
+
+    invalid_param_values = ["abc", None, [1, 2]]
+
+    for param_val in invalid_param_values:
+        l = BlockchainLedger()
+        s = ICSSimulator()
+        f = ForensicReconstructionEngine(l)
+
+        cmd = s.execute_command("AUTHORIZED_ENG_01", "SET_RPM", "PUMP_A_01", {"rpm": 3000.0})
+        l.anchor_event(cmd)
+
+        db_ev = copy.deepcopy(cmd)
+        db_ev["parameters"] = param_val
+
+        recon = f.reconstruct_incident([db_ev])
+
+        intel = intel_engine.correlate_incident([db_ev], {}, tampered_detected=recon["tamper_detected"])
+        assert isinstance(intel, dict) and "matched_techniques" in intel
+
+        html_report = report_gen.generate_html_report(recon, intel, s.get_telemetry_snapshot())
+        assert isinstance(html_report, str) and len(html_report) > 0
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print(" 🧪 RUNNING IRONLEDGER AUTOMATED TEST SUITE")
@@ -329,6 +360,7 @@ if __name__ == "__main__":
         ("Anomaly Detector Physics & ML", lambda: test_anomaly_detector_physics_and_ml(AnomalyDetector(), ICSSimulator())),
         ("Tamper Parameter Hash Verification", lambda: test_forensic_tamper_parameter_verification()),
         ("Malformed DB Record Handling", lambda: test_malformed_db_record_handling()),
+        ("Tampered Parameters Correlation Resilience", lambda: test_tampered_parameters_correlate_and_report_resilience()),
     ]
 
     passed = 0

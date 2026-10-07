@@ -16,7 +16,7 @@ echo "Listing ironledger_clean.zip contents:"
 unzip -l ironledger_clean.zip
 
 for pattern in '(^|/)\.env$' '\.git/' '\.pyc$' '(^|/)\.DS_Store$'; do
-  if unzip -l ironledger_clean.zip | grep -E -q "$pattern"; then
+  if unzip -Z1 ironledger_clean.zip | grep -E -q "$pattern"; then
     echo "WARNING: Zip file contains forbidden entry matching pattern: $pattern"
   fi
 done
