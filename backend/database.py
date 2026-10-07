@@ -33,6 +33,20 @@ except ImportError:
     logger.warning("supabase-py not installed — running in memory-only mode.")
 
 
+def _safe_json_loads(val: Any, default: Any = None) -> Any:
+    """Safely decodes JSON whether it is returned as str, dict, or list from Supabase."""
+    if val is None:
+        return default if default is not None else {}
+    if isinstance(val, (dict, list)):
+        return val
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except Exception:
+            return default if default is not None else {}
+    return default if default is not None else {}
+
+
 class SupabaseDatabase:
     """
     Thin wrapper around the Supabase Python client for IronLedger persistence.
@@ -97,32 +111,38 @@ class SupabaseDatabase:
             logger.error(f"upsert_event failed: {exc}")
             return False
 
-    def load_events(self) -> List[Dict[str, Any]]:
+    def load_events(self) -> Optional[List[Dict[str, Any]]]:
         """
         Restore the full ICS event log from Supabase (used on server startup).
         """
         if not self._enabled:
             return []
         try:
-            resp = self._client.table("ics_events").select("*").order("event_id").execute()
             events = []
-            for row in resp.data:
-                events.append({
-                    "event_id":             row["event_id"],
-                    "timestamp":            row["timestamp"],
-                    "timestamp_ms":         row.get("timestamp_ms") or int(row["timestamp"] * 1000),
-                    "source":               row["source"],
-                    "command_type":         row["command_type"],
-                    "entity_id":            row["entity_id"],
-                    "parameters":           json.loads(row.get("parameters") or "{}"),
-                    "plant_state_snapshot": json.loads(row.get("plant_state_snapshot") or "{}"),
-                    "signature":            row.get("signature"),
-                })
+            offset = 0
+            limit = 1000
+            while True:
+                resp = self._client.table("ics_events").select("*").order("event_id").range(offset, offset + limit - 1).execute()
+                if not resp.data:
+                    break
+                for row in resp.data:
+                    events.append({
+                        "event_id":             row["event_id"],
+                        "timestamp":            row["timestamp"],
+                        "timestamp_ms":         row.get("timestamp_ms") or int(row["timestamp"] * 1000),
+                        "source":               row["source"],
+                        "command_type":         row["command_type"],
+                        "entity_id":            row["entity_id"],
+                        "parameters":           _safe_json_loads(row.get("parameters"), {}),
+                        "plant_state_snapshot": _safe_json_loads(row.get("plant_state_snapshot"), {}),
+                        "signature":            row.get("signature"),
+                    })
+                offset += limit
             logger.info(f"Loaded {len(events)} ICS events from Supabase.")
             return events
         except Exception as exc:
             logger.error(f"load_events failed: {exc}")
-            return []
+            return None
 
     def delete_event(self, event_id: int) -> bool:
         """Delete a single ICS event (used in log-tamper simulation)."""
@@ -180,6 +200,7 @@ class SupabaseDatabase:
                 "status":         block.get("status", "CONFIRMED_ON_CHAIN"),
                 "is_simulated":   block.get("is_simulated", True),
                 "etherscan_url":  block.get("etherscan_url"),
+                "parameters":     json.dumps(block.get("parameters", {})),
             }
             self._client.table("blockchain_blocks").upsert(row, on_conflict="block_index").execute()
             return True
@@ -187,25 +208,38 @@ class SupabaseDatabase:
             logger.error(f"upsert_block failed: {exc}")
             return False
 
-    def load_blocks(self) -> List[Dict[str, Any]]:
+    def load_blocks(self) -> Optional[List[Dict[str, Any]]]:
         """Restore blockchain blocks from Supabase."""
         if not self._enabled:
             return []
         try:
-            resp = self._client.table("blockchain_blocks").select("*").order("block_index").execute()
-            return resp.data or []
+            blocks = []
+            offset = 0
+            limit = 1000
+            while True:
+                resp = self._client.table("blockchain_blocks").select("*").order("block_index").range(offset, offset + limit - 1).execute()
+                if not resp.data:
+                    break
+                for row in resp.data:
+                    # Parse parameters JSON if present (column added in schema V2.2)
+                    if "parameters" in row and isinstance(row["parameters"], str):
+                        row["parameters"] = _safe_json_loads(row["parameters"], {})
+                    blocks.append(row)
+                offset += limit
+            return blocks
         except Exception as exc:
             logger.error(f"load_blocks failed: {exc}")
-            return []
+            return None
 
     def clear_all_tables(self) -> bool:
-        """Truncate all events and blocks to migrate or reset clean state."""
+        """Truncate all events, blocks, and forensic cases to migrate or reset clean state."""
         if not self._enabled:
             return False
         try:
             self._client.table("blockchain_blocks").delete().neq("block_index", -1).execute()
             self._client.table("ics_events").delete().neq("event_id", -1).execute()
-            logger.info("Cleared all events and blocks from Supabase.")
+            self._client.table("forensic_cases").delete().neq("id", -1).execute()
+            logger.info("Cleared all events, blocks, and forensic cases from Supabase.")
             return True
         except Exception as exc:
             logger.error(f"clear_all_tables failed: {exc}")
@@ -289,10 +323,10 @@ class SupabaseDatabase:
             if not resp.data:
                 return None
             c = resp.data
-            c["mitre_techniques"]   = json.loads(c.get("mitre_techniques") or "[]")
-            c["timeline"]           = json.loads(c.get("timeline") or "[]")
-            c["threat_intel"]       = json.loads(c.get("threat_intel") or "{}")
-            c["telemetry_snapshot"] = json.loads(c.get("telemetry_snapshot") or "{}")
+            c["mitre_techniques"]   = _safe_json_loads(c.get("mitre_techniques"), [])
+            c["timeline"]           = _safe_json_loads(c.get("timeline"), [])
+            c["threat_intel"]       = _safe_json_loads(c.get("threat_intel"), {})
+            c["telemetry_snapshot"] = _safe_json_loads(c.get("telemetry_snapshot"), {})
             return c
         except Exception as exc:
             logger.error(f"get_case({case_id}) failed: {exc}")

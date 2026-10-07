@@ -253,23 +253,49 @@ class ICSSimulator:
         
         if entity_id == self.pump_a["id"]:
             if command_type == "SET_RPM":
-                self.pump_a["target_rpm"] = float(parameters.get("rpm", 2400.0))
+                raw_rpm = parameters.get("rpm", 2400.0)
+                if isinstance(raw_rpm, bool):
+                    raise ValueError("Parameter 'rpm' must be a numeric value, not boolean.")
+                try:
+                    self.pump_a["target_rpm"] = float(raw_rpm)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter 'rpm' must be a valid number, got '{raw_rpm}'.")
             elif command_type == "STOP":
                 self.pump_a["state"] = "STOPPED"
                 self.pump_a["target_rpm"] = 0.0
             elif command_type == "START":
                 self.pump_a["state"] = "RUNNING"
-                self.pump_a["target_rpm"] = float(parameters.get("rpm", 2400.0))
+                raw_rpm = parameters.get("rpm", 2400.0)
+                if isinstance(raw_rpm, bool):
+                    raise ValueError("Parameter 'rpm' must be a numeric value, not boolean.")
+                try:
+                    self.pump_a["target_rpm"] = float(raw_rpm)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter 'rpm' must be a valid number, got '{raw_rpm}'.")
 
         elif entity_id == self.valve_vent["id"]:
             if command_type == "SET_VALVE":
-                self.valve_vent["open_percent"] = float(parameters.get("open_percent", 15.0))
-                self.valve_vent["target_percent"] = self.valve_vent["open_percent"]
+                raw_open = parameters.get("open_percent", 15.0)
+                if isinstance(raw_open, bool):
+                    raise ValueError("Parameter 'open_percent' must be a numeric value, not boolean.")
+                try:
+                    val = float(raw_open)
+                    self.valve_vent["open_percent"] = val
+                    self.valve_vent["target_percent"] = val
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter 'open_percent' must be a valid number, got '{raw_open}'.")
 
         elif entity_id == self.valve_inlet["id"]:
             if command_type == "SET_VALVE":
-                self.valve_inlet["open_percent"] = float(parameters.get("open_percent", 75.0))
-                self.valve_inlet["target_percent"] = self.valve_inlet["open_percent"]
+                raw_open = parameters.get("open_percent", 75.0)
+                if isinstance(raw_open, bool):
+                    raise ValueError("Parameter 'open_percent' must be a numeric value, not boolean.")
+                try:
+                    val = float(raw_open)
+                    self.valve_inlet["open_percent"] = val
+                    self.valve_inlet["target_percent"] = val
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter 'open_percent' must be a valid number, got '{raw_open}'.")
 
         elif entity_id == self.sis["id"]:
             if command_type == "OVERRIDE_SIS":
@@ -280,8 +306,12 @@ class ICSSimulator:
                 self.pump_a["state"] = "RUNNING"
                 self.pump_a["target_rpm"] = 2400.0
 
+        next_id = 1
+        if self.event_log:
+            next_id = max(e.get("event_id", 0) for e in self.event_log) + 1
+            
         event = {
-            "event_id": len(self.event_log) + 1,
+            "event_id": next_id,
             "timestamp": timestamp,
             "source": source,
             "command_type": command_type,

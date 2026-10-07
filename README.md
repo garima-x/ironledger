@@ -73,8 +73,9 @@ pytest backend/test_pipeline.py -v
 
 - **Adversary Assumptions:** An attacker may gain administrative or root access on the SCADA supervisory workstation or historian database (e.g., Supabase, SQLite, SQL Server) and attempt to alter historical event records, modify timestamps, or forge benign maintenance logs.
 - **Cryptographic Guarantees:** Because each state hash incorporates the event ID, millisecond-precision timestamp, command parameters, plant state snapshot hash, and the prior block's hash, any retro-active modification creates an immediate cryptographic hash mismatch during audit.
-- **Chain Linkage:** The audit engine traverses the chain forward from genesis, verifying that every block's stored `previous_hash` matches the true hash of the predecessor block.
-- **Production Recommendations:** In production deployments, bind the API to internal networks, enforce API authentication (`API_KEY`), enable database Row-Level Security (RLS) policies, and connect to a private or public Ethereum node with dedicated gas-funded relayer accounts.
+- **Local Demo vs. Production Security:** 
+  - **Local Demo:** The server binds strictly to `127.0.0.1:8080` (localhost-only). For demo simplicity, write endpoints are accessible without requiring credentials embedded in frontend JavaScript (which provides no genuine security). Interactive attack and tamper features are enabled via `DEMO_MODE=true`.
+  - **Production Deployment:** Bind the application behind an authenticating reverse proxy (e.g., Nginx with mTLS/OIDC, Cloudflare Access, or OAuth2-Proxy) or integrate user session/JWT authentication (e.g., Supabase Auth). Set `DEMO_MODE=false` to permanently disable attack and tamper simulation endpoints, and restrict Supabase database access using strict Row-Level Security (RLS) policies.
 
 ---
 

@@ -35,8 +35,7 @@ def _canonicalize_value(val: Any) -> Any:
 
 def _canon(obj: Any) -> str:
     """Produces sorted, deterministic canonical JSON string."""
-    cleaned = _canonicalize_value(obj)
-    return json.dumps(cleaned, sort_keys=True, separators=(',', ':'))
+    return json.dumps(obj, sort_keys=True, separators=(',', ':'))
 
 
 GENESIS_PAYLOAD = {"genesis_root": "IRONLEDGER_ICS_GENESIS_ROOT_V2"}
@@ -47,7 +46,7 @@ class BlockchainLedger:
     def __init__(self, sepolia_contract_address: Optional[str] = None):
         self.sepolia_contract_address = (
             sepolia_contract_address
-            or os.environ.get("SEPOLIA_CONTRACT_ADDRESS", "0x91FB25541e11512E441Ebb980f0EADad8cD81a6A")
+            or os.environ.get("SEPOLIA_CONTRACT_ADDRESS", "").strip()
         )
         self.rpc_url = os.environ.get("SEPOLIA_RPC_URL", "").strip()
         self.private_key = os.environ.get("ANCHOR_PRIVATE_KEY", "").strip()
@@ -59,14 +58,17 @@ class BlockchainLedger:
 
         self.chain: List[Dict[str, Any]] = []
         self.hash_index: Dict[str, Dict[str, Any]] = {}
-        self.latest_sepolia_block = 6849200
         
         # Tamper-isolated anchor mirror to detect local in-memory chain rebuilds
         self._immutable_anchor_mirror: List[Dict[str, Any]] = []
 
-        # Background async transaction queue
+        # Cache for smart contract on-chain evidence
+        self._onchain_hashes_cache = None
+        self._onchain_cache_time = 0.0
+
         self._tx_queue: Queue = Queue()
         self._queue_worker_running = False
+        self.on_block_updated = None
 
         self._init_web3()
 
@@ -82,7 +84,7 @@ class BlockchainLedger:
             "command_type": "INITIALIZE_LEDGER",
             "entity_id": "SYS_ROOT",
             "tx_hash": None,
-            "block_number": self.latest_sepolia_block,
+            "block_number": None,
             "recorded_by": "0x0000000000000000000000000000000000000000",
             "status": "CONFIRMED_ON_CHAIN" if not self.is_simulated else "SIMULATED_LOCAL_CHAIN",
             "is_simulated": self.is_simulated,
@@ -180,6 +182,7 @@ class BlockchainLedger:
                 if receipt.status == 1:
                     block_ref["block_number"] = receipt.blockNumber
                     block_ref["status"] = "CONFIRMED_ON_CHAIN"
+                    self._onchain_hashes_cache = None
                 else:
                     block_ref["status"] = "REVERTED_ON_CHAIN"
             except Exception as exc:
@@ -187,6 +190,9 @@ class BlockchainLedger:
                 block_ref["status"] = "FAILED_ON_CHAIN"
                 block_ref["tx_hash"] = None
                 block_ref["etherscan_url"] = None
+
+            if self.on_block_updated:
+                self.on_block_updated(block_ref)
 
             self._tx_queue.task_done()
 
@@ -199,7 +205,8 @@ class BlockchainLedger:
         ts_ms = int(raw_ts * 1000)
         
         snap = event.get("plant_state_snapshot", {})
-        snap_hash = hashlib.sha256(_canon(snap).encode('utf-8')).hexdigest()
+        snap_canon = _canonicalize_value(snap)
+        snap_hash = hashlib.sha256(_canon(snap_canon).encode('utf-8')).hexdigest()
 
         payload = {
             "event_id": int(event.get("event_id", 0)),
@@ -207,7 +214,7 @@ class BlockchainLedger:
             "source": str(event.get("source", "")),
             "command_type": str(event.get("command_type", "")),
             "entity_id": str(event.get("entity_id", "")),
-            "parameters": event.get("parameters", {}),
+            "parameters": _canonicalize_value(event.get("parameters", {})),
             "snapshot_sha256": snap_hash,
             "previous_hash": previous_hash
         }
@@ -227,7 +234,7 @@ class BlockchainLedger:
         ts_sec = float(event.get("timestamp", time.time()))
         ts_ms = int(ts_sec * 1000)
 
-        recorded_by = signer_address or (self.account.address if self.account else "0x2C4e08287F4b8f04c64391F0317eDeF1778cD630")
+        recorded_by = signer_address or (self.account.address if self.account else "0x0000000000000000000000000000000000000000")
 
         block = {
             "block_index": len(self.chain),
@@ -239,8 +246,9 @@ class BlockchainLedger:
             "source": str(event.get("source", "UNKNOWN")),
             "command_type": str(event.get("command_type", "TELEMETRY_SNAPSHOT")),
             "entity_id": str(event.get("entity_id", "PLANT")),
+            "parameters": event.get("parameters", {}),
             "tx_hash": None,
-            "block_number": self.latest_sepolia_block + len(self.chain),
+            "block_number": None,
             "recorded_by": recorded_by,
             "status": "QUEUED_ON_CHAIN" if not self.is_simulated else "SIMULATED_LOCAL_CHAIN",
             "is_simulated": self.is_simulated,
@@ -260,7 +268,9 @@ class BlockchainLedger:
     def verify_against_contract(self) -> Dict[str, Any]:
         """
         Read-back verification directly querying the deployed Smart Contract on Sepolia.
-        Checks totalEvents, lastHash, and verifies each eventHash against getEvent(i).
+        Fetches all on-chain hashes once and caches them for 30s to minimize RPC calls.
+        For every local block with status CONFIRMED_ON_CHAIN (or non-genesis block on chain),
+        checks that its hash is in the on-chain set, flagging any missing or mismatched hashes.
         """
         if self.is_simulated or not self.contract or not self.w3:
             return {
@@ -271,26 +281,50 @@ class BlockchainLedger:
             }
 
         try:
-            # EvidenceChain: evidenceCount() replaces totalEvents()
-            # EvidenceChain has no lastHash() — chain integrity is enforced off-chain
-            total_onchain = self.contract.functions.evidenceCount().call()
+            now = time.time()
+            # Fetch on-chain hashes once and cache for 30s to avoid repeated RPC round-trips
+            if (
+                self._onchain_hashes_cache is None
+                or (now - self._onchain_cache_time) > 30.0
+            ):
+                total_onchain = self.contract.functions.evidenceCount().call()
+                onchain_hashes = set()
+                onchain_by_index = {}
+                for i in range(1, total_onchain + 1):
+                    ev_data = self.contract.functions.getEvidence(i).call()
+                    # ev_data: (evidenceId, caseId, evidenceHash, description, uploadedBy, timestamp)
+                    h = str(ev_data[2]).strip().lower()
+                    onchain_hashes.add(h)
+                    onchain_by_index[i] = h
+
+                self._onchain_hashes_cache = {
+                    "total": total_onchain,
+                    "hashes": onchain_hashes,
+                    "by_index": onchain_by_index
+                }
+                self._onchain_cache_time = now
+
+            cached = self._onchain_hashes_cache
+            total_onchain = cached["total"]
+            onchain_hashes = cached["hashes"]
 
             discrepancies = []
-            checked_count = min(total_onchain, len(self.chain) - 1)
 
-            for i in range(1, checked_count + 1):
-                ev_data = self.contract.functions.getEvidence(i).call()
-                # ev_data: (evidenceId, caseId, evidenceHash, description, uploadedBy, timestamp)
-                onchain_ev_hash = ev_data[2]  # evidenceHash is a plain string, no .hex() needed
-                local_ev_hash = self.chain[i]["event_hash"]
+            # Check every local block with status CONFIRMED_ON_CHAIN
+            for blk in self.chain[1:]:
+                blk_idx = blk.get("block_index")
+                status = blk.get("status")
+                local_h = blk.get("event_hash", "").strip().lower()
 
-                if onchain_ev_hash.lower() != local_ev_hash.lower():
-                    discrepancies.append({
-                        "event_id": i,
-                        "onchain_hash": onchain_ev_hash,
-                        "local_hash": local_ev_hash,
-                        "reason": "ONCHAIN_SMART_CONTRACT_MISMATCH"
-                    })
+                if status == "CONFIRMED_ON_CHAIN" or blk.get("tx_hash"):
+                    if local_h not in onchain_hashes:
+                        discrepancies.append({
+                            "block_index": blk_idx,
+                            "event_id": blk.get("event_id"),
+                            "local_hash": local_h,
+                            "onchain_hash": "MISSING_FROM_SMART_CONTRACT",
+                            "reason": "CONFIRMED_BLOCK_NOT_FOUND_ON_CHAIN"
+                        })
 
             return {
                 "contract_connected": True,
@@ -380,7 +414,23 @@ class BlockchainLedger:
                 })
             else:
                 # Recompute hash using true prev hash
-                computed = self.compute_event_hash(ev, prev)
+                try:
+                    computed = self.compute_event_hash(ev, prev)
+                except (ValueError, TypeError, KeyError):
+                    findings.append({
+                        "block_index": blk_idx,
+                        "event_id": ev_id,
+                        "tampered": True,
+                        "reason": "MALFORMED_RECORD",
+                        "immutable_onchain_hash": blk.get("event_hash", ""),
+                        "computed_db_hash": "MALFORMED_RECORD",
+                        "tx_hash": blk.get("tx_hash"),
+                        "block_number": blk.get("block_number"),
+                        "verdict": "TAMPER_DETECTED_MALFORMED_RECORD"
+                    })
+                    prev = blk.get("event_hash")
+                    continue
+
                 expected = blk.get("event_hash", "")
                 if computed.lower() != expected.lower():
                     findings.append({

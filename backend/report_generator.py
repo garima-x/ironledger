@@ -5,6 +5,7 @@ with chain-of-custody, backward-walk timeline, and MITRE ATT&CK for ICS attribut
 """
 
 import time
+import html as html_mod
 from typing import Dict, Any, List
 
 
@@ -14,7 +15,7 @@ class ForensicReportGenerator:
         forensic_data: Dict[str, Any],
         threat_intel: Dict[str, Any],
         telemetry_snapshot: Dict[str, Any],
-        contract_address: str = "0x7a36B3DeE1F03287cCE488f2604245F11dF9d78F",
+        contract_address: str = "",
         is_simulated: bool = True
     ) -> str:
         """Generates self-contained, publication-grade HTML digital forensics report with clear mode disclosure."""
@@ -44,9 +45,26 @@ class ForensicReportGenerator:
             </div>"""
         )
 
+        # Coerce root cause parameters if present
+        rc_params = root_cause.get("parameters")
+        if not isinstance(rc_params, dict):
+            root_cause_params = {}
+            root_cause_params_raw = html_mod.escape(str(rc_params)) if rc_params is not None else ""
+        else:
+            root_cause_params = rc_params
+            root_cause_params_raw = ""
+
         # Build timeline HTML rows
         timeline_rows = ""
         for item in timeline:
+            raw_params = item.get("parameters")
+            if isinstance(raw_params, dict):
+                params_dict = raw_params
+                params_text = ", ".join(f"{html_mod.escape(str(k))}={html_mod.escape(str(v))}" for k, v in params_dict.items()) if params_dict else ""
+            else:
+                params_dict = {}
+                params_text = html_mod.escape(str(raw_params)) if raw_params is not None else ""
+
             badge_class = "tamper-badge" if item.get("tampered") else "valid-badge"
             badge_text = "TAMPERED MISMATCH" if item.get("tampered") else "BLOCKCHAIN VERIFIED"
             
@@ -58,20 +76,30 @@ class ForensicReportGenerator:
             else:
                 tx_link = '<span class="tx-none">Local Anchor</span>'
 
-            policy_text = f"<br><small style='color:#f87171;'>{item.get('policy_reason')}</small>" if item.get('policy_violation') else ""
+            policy_text = f"<br><small style='color:#f87171;'>{html_mod.escape(str(item.get('policy_reason', '')))}</small>" if item.get('policy_violation') else ""
 
-            import html
-            src = html.escape(str(item.get('source', '-')))
-            cmd = html.escape(str(item.get('command_type', '-')))
-            ent = html.escape(str(item.get('entity_id', '-')))
-            phase = html.escape(str(item.get('kill_chain_phase', '-')))
+            src = html_mod.escape(str(item.get('source', '-')))
+            cmd = html_mod.escape(str(item.get('command_type', '-')))
+            ent = html_mod.escape(str(item.get('entity_id', '-')))
+            phase = html_mod.escape(str(item.get('kill_chain_phase', '-')))
+
+            if item.get("tampered") and item.get("claimed_source"):
+                claimed_s = html_mod.escape(str(item.get('claimed_source', '')))
+                claimed_c = html_mod.escape(str(item.get('claimed_command', '')))
+                src_display = f'<span class="source-tag">{src}</span><br><small style="color:#f87171;">(DB claimed: {claimed_s})</small>'
+                cmd_display = f'<code>{cmd}</code><br><small style="color:#f87171;">(DB claimed: {claimed_c})</small>'
+            else:
+                src_display = f'<span class="source-tag">{src}</span>'
+                cmd_display = f'<code>{cmd}</code>'
+                if params_text:
+                    cmd_display += f'<br><small style="color:var(--text-muted);">({params_text})</small>'
 
             timeline_rows += f"""
             <tr>
                 <td><strong>#{item.get('event_id', '-')}</strong></td>
                 <td>{item.get('formatted_time', '-')}</td>
-                <td><span class="source-tag">{src}</span></td>
-                <td><code>{cmd}</code></td>
+                <td>{src_display}</td>
+                <td>{cmd_display}</td>
                 <td>{ent}</td>
                 <td>{phase}{policy_text}</td>
                 <td><span class="{badge_class}">{badge_text}</span></td>
@@ -83,15 +111,20 @@ class ForensicReportGenerator:
         # Build MITRE techniques rows
         mitre_rows = ""
         for t in threat_intel.get("matched_techniques", []):
+            t_id = html_mod.escape(str(t.get('id', '')))
+            t_tactic = html_mod.escape(str(t.get('tactic', '')))
+            t_name = html_mod.escape(str(t.get('name', '')))
+            t_desc = html_mod.escape(str(t.get('description', '')))
+            t_mit = html_mod.escape(str(t.get('mitigation', '')))
             mitre_rows += f"""
             <div class="technique-card">
                 <div class="tech-header">
-                    <span class="tech-id">{t.get('id')}</span>
-                    <span class="tech-tactic">{t.get('tactic')}</span>
+                    <span class="tech-id">{t_id}</span>
+                    <span class="tech-tactic">{t_tactic}</span>
                 </div>
-                <h4>{t.get('name')}</h4>
-                <p>{t.get('description')}</p>
-                <div class="tech-mitigation"><strong>Mitigation:</strong> {t.get('mitigation')}</div>
+                <h4>{t_name}</h4>
+                <p>{t_desc}</p>
+                <div class="tech-mitigation"><strong>Mitigation:</strong> {t_mit}</div>
             </div>
             """
 
@@ -355,7 +388,7 @@ class ForensicReportGenerator:
             <div class="meta-box">
                 <div>Report ID: <strong>{report_id}</strong></div>
                 <div>Generated: <strong>{timestamp_str}</strong></div>
-                <div>Contract Anchor: <strong>{contract_address[:8]}...{contract_address[-6:]}</strong></div>
+                <div>Contract Anchor: <strong>{(contract_address[:8] + '...' + contract_address[-6:]) if len(contract_address) > 14 else ('Local Simulation' if not contract_address else contract_address)}</strong></div>
                 <div style="margin-top: 10px;" class="no-print">
                     <button class="print-btn" onclick="window.print()">Print / Export PDF</button>
                 </div>
@@ -370,8 +403,8 @@ class ForensicReportGenerator:
         <div class="card-grid">
             <div class="info-card">
                 <div class="label">Primary Threat Actor Hypothesis</div>
-                <div class="value" style="color: #60a5fa;">{actor.get('name', 'Uncorrelated')}</div>
-                <div class="sub">Origin: {actor.get('origin', 'Unknown')}</div>
+                <div class="value" style="color: #60a5fa;">{html_mod.escape(str(actor.get('name', 'Uncorrelated')))}</div>
+                <div class="sub">Origin: {html_mod.escape(str(actor.get('origin', 'Unknown')))}</div>
             </div>
             <div class="info-card">
                 <div class="label">Attribution Confidence</div>
@@ -380,13 +413,18 @@ class ForensicReportGenerator:
             </div>
             <div class="info-card">
                 <div class="label">Root Cause Entry Point</div>
-                <div class="value" style="color: #f87171;">{root_cause.get('source_identity', 'Unknown')}</div>
-                <div class="sub">Command: {root_cause.get('entry_command', 'None')} ({root_cause.get('target_entity', '-')})</div>
+                <div class="value" style="color: #f87171;">{html_mod.escape(str(root_cause.get('source_identity', 'Unknown')))}</div>
+                <div class="sub">Command: {html_mod.escape(str(root_cause.get('entry_command', 'None')))} ({html_mod.escape(str(root_cause.get('target_entity', '-')))})</div>
             </div>
         </div>
         <p style="font-size: 14px; color: #cbd5e1; margin-bottom: 24px; background: #0f172a; padding: 14px; border-left: 4px solid var(--accent-cyan); border-radius: 4px;">
-            <strong>Forensic Determination:</strong> {root_cause.get('forensic_conclusion', 'Baseline inspection.')}
+            <strong>Forensic Determination:</strong> {html_mod.escape(str(root_cause.get('forensic_conclusion', 'Baseline inspection.')))}
         </p>
+
+        <div class="alert-banner warning" style="margin-bottom: 25px;">
+            <strong>⚠️ OPERATOR ATTRIBUTION LIMITATION:</strong>
+            Operator identity is based on the self-reported command source identifier. Without hardware-enforced IEEE 802.1AR device certificates, cryptographic command signatures (HMAC/ECDSA), or network-layer mTLS, unauthenticated endpoints on the ICS control network can forge source headers (e.g., claiming <code>AUTHORIZED_ENG_01</code>). Identity attribution should be corroborated with switch port 802.1X logs and physical facility access records.
+        </div>
 
         <h2>2. Cryptographically Anchored Reconstructed Timeline</h2>
         <table>

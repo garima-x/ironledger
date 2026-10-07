@@ -29,7 +29,7 @@ COMMENT ON TABLE public.ics_events IS
 -- ── 2. Blockchain Blocks (immutable ledger mirror) ──────────
 CREATE TABLE IF NOT EXISTS public.blockchain_blocks (
     block_index   BIGINT PRIMARY KEY,
-    event_id      BIGINT REFERENCES public.ics_events(event_id) ON DELETE SET NULL,
+    event_id      BIGINT REFERENCES public.ics_events(event_id) ON DELETE RESTRICT,
     event_hash    TEXT NOT NULL,
     previous_hash TEXT NOT NULL,
     timestamp     BIGINT NOT NULL,
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS public.blockchain_blocks (
     source        TEXT NOT NULL,
     command_type  TEXT NOT NULL,
     entity_id     TEXT NOT NULL,
+    parameters    TEXT DEFAULT '{}',        -- JSON string: authentic command parameters
     tx_hash       TEXT,
     block_number  BIGINT,
     recorded_by   TEXT,
@@ -71,21 +72,41 @@ CREATE TABLE IF NOT EXISTS public.forensic_cases (
     telemetry_snapshot   TEXT DEFAULT '{}'     -- JSON object string
 );
 
+-- ── 3b. Migrations for Pre-Existing Tables ────────────────────
+-- CREATE TABLE IF NOT EXISTS will not change column types of tables that already exist.
+-- The following statements safely alter existing JSONB columns to TEXT if run against an existing schema:
+ALTER TABLE IF EXISTS public.ics_events 
+    ALTER COLUMN parameters TYPE TEXT USING parameters::TEXT,
+    ALTER COLUMN plant_state_snapshot TYPE TEXT USING plant_state_snapshot::TEXT;
+
+ALTER TABLE IF EXISTS public.forensic_cases 
+    ALTER COLUMN mitre_techniques TYPE TEXT USING mitre_techniques::TEXT,
+    ALTER COLUMN timeline TYPE TEXT USING timeline::TEXT,
+    ALTER COLUMN threat_intel TYPE TEXT USING threat_intel::TEXT,
+    ALTER COLUMN telemetry_snapshot TYPE TEXT USING telemetry_snapshot::TEXT;
+
+-- V2.2: Add parameters column to blockchain_blocks for tamper-proof parameter storage
+ALTER TABLE IF EXISTS public.blockchain_blocks
+    ADD COLUMN IF NOT EXISTS parameters TEXT DEFAULT '{}';
+
 -- ── 4. Row-Level Security (RLS) ──────────────────────────────
 ALTER TABLE public.ics_events        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blockchain_blocks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.forensic_cases    ENABLE ROW LEVEL SECURITY;
 
--- Allow public / anon read access
-CREATE POLICY IF NOT EXISTS "anon_read_ics"       ON public.ics_events        FOR SELECT USING (TRUE);
-CREATE POLICY IF NOT EXISTS "anon_read_blocks"    ON public.blockchain_blocks FOR SELECT USING (TRUE);
-CREATE POLICY IF NOT EXISTS "anon_read_cases"     ON public.forensic_cases    FOR SELECT USING (TRUE);
+-- Allow service-role ALL access
+DROP POLICY IF EXISTS "anon_read_ics" ON public.ics_events;
+DROP POLICY IF EXISTS "anon_read_blocks" ON public.blockchain_blocks;
+DROP POLICY IF EXISTS "anon_read_cases" ON public.forensic_cases;
 
--- Allow authenticated/service-role insert & update
-CREATE POLICY IF NOT EXISTS "service_insert_ics"    ON public.ics_events        FOR INSERT WITH CHECK (TRUE);
-CREATE POLICY IF NOT EXISTS "service_update_ics"    ON public.ics_events        FOR UPDATE USING (TRUE);
-CREATE POLICY IF NOT EXISTS "service_insert_blocks" ON public.blockchain_blocks FOR INSERT WITH CHECK (TRUE);
-CREATE POLICY IF NOT EXISTS "service_insert_cases"  ON public.forensic_cases    FOR INSERT WITH CHECK (TRUE);
+DROP POLICY IF EXISTS "service_write_ics" ON public.ics_events;
+CREATE POLICY "service_write_ics" ON public.ics_events FOR ALL TO service_role USING (TRUE) WITH CHECK (TRUE);
+
+DROP POLICY IF EXISTS "service_write_blocks" ON public.blockchain_blocks;
+CREATE POLICY "service_write_blocks" ON public.blockchain_blocks FOR ALL TO service_role USING (TRUE) WITH CHECK (TRUE);
+
+DROP POLICY IF EXISTS "service_write_cases" ON public.forensic_cases;
+CREATE POLICY "service_write_cases" ON public.forensic_cases FOR ALL TO service_role USING (TRUE) WITH CHECK (TRUE);
 
 -- ── 5. Indexes ───────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_ics_events_timestamp        ON public.ics_events(timestamp);

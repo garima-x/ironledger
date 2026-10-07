@@ -210,6 +210,108 @@ def test_anomaly_detector_physics_and_ml(anomaly_detector, simulator):
     assert "PRESSURE_VESSEL_PRESSURE" in breach_eval["flagged_sensors"]
 
 
+def test_forensic_tamper_parameter_verification():
+    """Verifies tamper detection and authentic parameter recovery via block hash validation."""
+    import copy
+    
+    # a) SET_RPM rpm=5000, then tamper DB parameters to {"rpm":2400}
+    l_a = BlockchainLedger()
+    s_a = ICSSimulator()
+    f_a = ForensicReconstructionEngine(l_a)
+    c_a = s_a.execute_command("AUTHORIZED_ENG_01", "SET_RPM", "PUMP_A_01", {"rpm": 5000.0})
+    l_a.anchor_event(c_a)
+    db_ev_a = copy.deepcopy(c_a)
+    db_ev_a["parameters"] = {"rpm": 2400.0}
+
+    recon_a = f_a.reconstruct_incident([db_ev_a])
+    step_a = recon_a["timeline"][0]
+    assert step_a["policy_violation"] is True
+    assert step_a["parameters"] == {"rpm": 5000.0}
+
+    # b) STOP with parameters {}, then tamper DB source to "X"
+    l_b = BlockchainLedger()
+    s_b = ICSSimulator()
+    f_b = ForensicReconstructionEngine(l_b)
+    c_b = s_b.execute_command("AUTHORIZED_ENG_01", "STOP", "PUMP_A_01", {})
+    l_b.anchor_event(c_b)
+    db_ev_b = copy.deepcopy(c_b)
+    db_ev_b["source"] = "X"
+
+    recon_b = f_b.reconstruct_incident([db_ev_b])
+    step_b = recon_b["timeline"][0]
+    assert step_b["policy_violation"] is False
+    assert step_b["source"] == "AUTHORIZED_ENG_01"
+
+    # c) same as (a) but also edit ledger block["parameters"] to {"rpm":2400}
+    l_c = BlockchainLedger()
+    s_c = ICSSimulator()
+    f_c = ForensicReconstructionEngine(l_c)
+    c_c = s_c.execute_command("AUTHORIZED_ENG_01", "SET_RPM", "PUMP_A_01", {"rpm": 5000.0})
+    b_c = l_c.anchor_event(c_c)
+    b_c["parameters"] = {"rpm": 2400.0}
+    db_ev_c = copy.deepcopy(c_c)
+    db_ev_c["parameters"] = {"rpm": 2400.0}
+
+    recon_c = f_c.reconstruct_incident([db_ev_c])
+    step_c = recon_c["timeline"][0]
+    assert step_c["policy_violation"] is True
+
+    # d) tamper the DB timestamp -> policy_violation True
+    l_d = BlockchainLedger()
+    s_d = ICSSimulator()
+    f_d = ForensicReconstructionEngine(l_d)
+    c_d = s_d.execute_command("AUTHORIZED_ENG_01", "START", "PUMP_A_01", {"rpm": 2400.0})
+    l_d.anchor_event(c_d)
+    db_ev_d = copy.deepcopy(c_d)
+    db_ev_d["timestamp"] = db_ev_d["timestamp"] + 100.0
+
+    recon_d = f_d.reconstruct_incident([db_ev_d])
+    step_d = recon_d["timeline"][0]
+    assert step_d["policy_violation"] is True
+
+
+def test_malformed_db_record_handling():
+    """Verifies that audit_entire_chain, reconstruct_incident, and report generation handle malformed DB values gracefully."""
+    import copy
+    from report_generator import ForensicReportGenerator
+    from threat_intel import ThreatIntelligenceEngine
+
+    report_gen = ForensicReportGenerator()
+    intel_engine = ThreatIntelligenceEngine()
+
+    tampered_cases = [
+        ("timestamp", "abc"),
+        ("timestamp", None),
+        ("parameters", "abc")
+    ]
+
+    for field, val in tampered_cases:
+        l = BlockchainLedger()
+        s = ICSSimulator()
+        f = ForensicReconstructionEngine(l)
+
+        cmd = s.execute_command("AUTHORIZED_ENG_01", "START", "PUMP_A_01", {"rpm": 2400.0})
+        l.anchor_event(cmd)
+        
+        db_ev = copy.deepcopy(cmd)
+        db_ev[field] = val
+
+        # 1. Audit check
+        audit = l.audit_entire_chain([db_ev])
+        assert not audit["integrity_healthy"], f"Audit failed to detect tamper for {field}={val}"
+        assert audit["tampered_blocks_found"] >= 1
+
+        # 2. Reconstruct incident check
+        recon = f.reconstruct_incident([db_ev])
+        assert recon["success"] is True, f"Reconstruct failed for {field}={val}"
+        assert recon["tamper_detected"] is True, f"Reconstruct tamper_detected False for {field}={val}"
+
+        # 3. HTML report generation check
+        intel = intel_engine.correlate_incident([], {}, tampered_detected=recon["tamper_detected"])
+        html_report = report_gen.generate_html_report(recon, intel, s.get_telemetry_snapshot())
+        assert isinstance(html_report, str) and len(html_report) > 0, f"HTML report generation failed for {field}={val}"
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print(" 🧪 RUNNING IRONLEDGER AUTOMATED TEST SUITE")
@@ -225,6 +327,8 @@ if __name__ == "__main__":
         ("Policy-Based Backward Walk", lambda: test_forensic_backward_walk_and_policy(BlockchainLedger(), ICSSimulator())),
         ("Threat Intel Objective Scoring", lambda: test_threat_intel_objective_scoring()),
         ("Anomaly Detector Physics & ML", lambda: test_anomaly_detector_physics_and_ml(AnomalyDetector(), ICSSimulator())),
+        ("Tamper Parameter Hash Verification", lambda: test_forensic_tamper_parameter_verification()),
+        ("Malformed DB Record Handling", lambda: test_malformed_db_record_handling()),
     ]
 
     passed = 0

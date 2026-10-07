@@ -36,3 +36,5 @@ wheels/
 # Environment Variables
 .env
 .env.local
+*.pyc
+ironledger_clean.zip

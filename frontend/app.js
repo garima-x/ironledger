@@ -219,7 +219,7 @@ function renderAnomalyEngine(anomaly) {
     // Rule Violations Box
     const box = document.getElementById("violations-box");
     if (anomaly.rule_violations && anomaly.rule_violations.length > 0) {
-        box.innerHTML = anomaly.rule_violations.map(v => `<div class="violation-item">${v}</div>`).join("");
+        box.innerHTML = anomaly.rule_violations.map(v => `<div class="violation-item">${esc(v)}</div>`).join("");
     } else {
         box.innerHTML = `<div class="empty-state">No physics threshold violations detected. Process envelope is secure.</div>`;
     }
@@ -238,7 +238,7 @@ function renderRecentBlocks(blocks) {
 
         return `
         <tr id="block-row-${b.block_index}">
-            <td class="block-tag">#${b.block_number}</td>
+            <td class="block-tag">${b.block_number != null ? '#' + b.block_number : 'SIM'}</td>
             <td><strong>#${b.event_id}</strong></td>
             <td>${dateStr}</td>
             <td><code>${esc(b.command_type || "")}</code></td>
@@ -264,7 +264,9 @@ async function triggerAttack(scenario) {
     try {
         const res = await fetch("/api/attack/inject", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify({ scenario })
         });
         const data = await res.json();
@@ -277,7 +279,9 @@ async function triggerAttack(scenario) {
 
 async function resetToNominal() {
     try {
-        await fetch("/api/attack/stop", { method: "POST" });
+        await fetch("/api/attack/stop", { 
+            method: "POST"
+        });
         const banner = document.getElementById("tamper-banner");
         if (banner) banner.classList.add("hidden");
         updateDashboard();
@@ -292,7 +296,9 @@ async function simulateDatabaseTamper() {
         // Pick an event from database to tamper with
         const res = await fetch("/api/tamper/simulate", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify({
                 event_id: 1,
                 malicious_field: "command_type",
@@ -377,15 +383,18 @@ async function runForensicReconstruction() {
                 const isRoot = (recon.root_cause_artifact && step.event_id === recon.root_cause_artifact.event_id);
                 const isTampered = step.tampered;
                 let cardClass = "step-card" + (isRoot ? " root-cause" : "") + (isTampered ? " tampered" : "");
+                const claimedHtml = (isTampered && step.claimed_source)
+                    ? `<br><small style="color: #f87171; font-weight: normal;">[Historian Forged: claimed ${esc(step.claimed_source)} &rarr; ${esc(step.claimed_command)}]</small>`
+                    : '';
 
                 return `
                 <div class="${cardClass}">
                     <div class="step-left">
-                        <span class="step-phase">${isRoot ? "🚨 [ROOT CAUSE ENTRY] " : ""}${step.kill_chain_phase}</span>
-                        <span class="step-cmd">${step.source} &rarr; ${step.command_type} (${step.entity_id})</span>
+                        <span class="step-phase">${isRoot ? "🚨 [ROOT CAUSE ENTRY] " : ""}${esc(step.kill_chain_phase)}</span>
+                        <span class="step-cmd">${esc(step.source)} &rarr; ${esc(step.command_type)} (${esc(step.entity_id)})${claimedHtml}</span>
                     </div>
                     <div class="step-right">
-                        <div>${step.formatted_time}</div>
+                        <div>${esc(step.formatted_time)}</div>
                         <div style="font-family: monospace; color: var(--accent-cyan);">${step.onchain_hash ? step.onchain_hash.slice(0, 12) + '...' : ''}</div>
                     </div>
                 </div>
@@ -533,7 +542,7 @@ function buildCaseCard(c) {
         <div class="case-card-conclusion">${esc(c.forensic_conclusion || "No conclusion recorded.")}</div>
         ${c.tamper_detected ? `<div class="case-tamper-flag">⚠️ TAMPER DETECTED</div>` : ""}
         ${mitreHtml ? `<div class="case-mitre-tags" style="margin-top:10px">${mitreHtml}</div>` : ""}
-        <div class="case-card-confidence">${Math.round((c.confidence_score || 0) * 100)}%</div>
+        <div class="case-card-confidence">${Math.round(c.confidence_score || 0)}%</div>
     `;
     return card;
 }
@@ -575,7 +584,9 @@ async function confirmSaveCase() {
     try {
         const res = await fetch("/api/cases/save", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify({ case_name: inputEl.value.trim() || null })
         });
         const data = await res.json();
@@ -586,11 +597,11 @@ async function confirmSaveCase() {
             result.textContent = `✅ Case "${cn}" saved to Supabase! Refreshing case list…`;
             setTimeout(() => { closeSaveCaseModal(); loadCases(); }, 1500);
         } else {
-            result.innerHTML = `⚠️ ${data.note || "Case not persisted — Supabase may be offline."}
+            result.innerHTML = `⚠️ ${esc(data.note || "Case not persisted — Supabase may be offline.")}
 <br><br>Reconstruction summary:<br>
-• Events analyzed: ${data.reconstruction_summary?.events_analyzed ?? "—"}<br>
-• Tamper detected: ${data.reconstruction_summary?.tamper_detected ?? "—"}<br>
-• Root cause: ${data.reconstruction_summary?.root_cause?.source_identity ?? "—"}`;
+• Events analyzed: ${esc(String(data.reconstruction_summary?.events_analyzed ?? "—"))}<br>
+• Tamper detected: ${esc(String(data.reconstruction_summary?.tamper_detected ?? "—"))}<br>
+• Root cause: ${esc(data.reconstruction_summary?.root_cause?.source_identity ?? "—")}`;
         }
     } catch (err) {
         result.className = "save-case-result error";
@@ -660,7 +671,7 @@ function renderCaseDetail(c) {
                 <span class="case-detail-key">Attributed Actor</span>
                 <span class="case-detail-val" style="color:#f59e0b;font-weight:700">${esc(c.attribution_actor || "Unknown")}</span>
                 <span class="case-detail-key">Confidence</span>
-                <span class="case-detail-val">${Math.round((c.confidence_score || 0) * 100)}%</span>
+                <span class="case-detail-val">${Math.round(c.confidence_score || 0)}%</span>
                 <span class="case-detail-key">MITRE Techniques</span>
                 <span class="case-detail-val">
                     <div class="case-mitre-tags">
