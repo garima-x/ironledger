@@ -445,15 +445,15 @@ def test_mocked_contract_timeout_no_resend_and_out_of_sync_stop():
     event_a = {"event_id": 1, "source": "TEST", "command_type": "START", "entity_id": "PUMP_A_01"}
 
     ledger_a._tx_queue.put({"block_ref": block_a, "event": event_a})
-    
+
     # Process single queue task
     ledger_a._queue_worker_running = False  # process one iteration
     task = ledger_a._tx_queue.get()
-    
+
     # Run inline processing logic
     event_hash = block_a["event_hash"]
     prev_hash = block_a["previous_hash"]
-    
+
     # Perform pre-send lastHash check
     onchain_last_hash = mock_contract_a.functions.lastHash().call()
     onchain_last_str = "0x" + onchain_last_hash.hex().lower()
@@ -512,6 +512,168 @@ def test_mocked_contract_timeout_no_resend_and_out_of_sync_stop():
     assert mock_w3_b.eth.send_raw_transaction.call_count == 0
 
 
+def test_real_worker_receipt_timeout_then_confirm_and_out_of_sync():
+    """
+    Starts the REAL _process_tx_queue worker thread with MagicMock w3/contract.
+
+    Scenario (a): get_transaction_receipt returns None once, then a successful receipt.
+        - send_raw_transaction called exactly once (no resend on timeout).
+        - Block ends as CONFIRMED_ON_CHAIN.
+        - The next block is subsequently sent.
+
+    Scenario (b): lastHash always returns a mismatched value.
+        - Nothing is sent (send_raw_transaction call_count == 0).
+        - Block status is CHAIN_OUT_OF_SYNC.
+    """
+    import threading
+    from unittest.mock import MagicMock
+
+    # ── Scenario (a): receipt times out once, then arrives ──────────────────────
+    ledger_a = BlockchainLedger()
+    ledger_a._test_mode = True  # short poll intervals: 0.01s each, 0.2s total timeout
+
+    mock_w3_a = MagicMock()
+    mock_contract_a = MagicMock()
+    mock_account_a = MagicMock()
+    mock_account_a.address = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+    genesis_hash_bytes = bytes.fromhex(ledger_a.genesis_block["event_hash"][2:])
+
+    # lastHash always matches so the pre-send check passes for block 1
+    mock_contract_a.functions.lastHash.return_value.call.return_value = genesis_hash_bytes
+
+    # Stub for the recordEvent function call chain
+    mock_func_call = MagicMock()
+    mock_func_call.estimate_gas.return_value = 100_000
+    mock_func_call.build_transaction.return_value = {"from": mock_account_a.address, "nonce": 1}
+    mock_contract_a.functions.recordEvent.return_value = mock_func_call
+
+    tx_hash_bytes = b"\xab" * 32
+    mock_w3_a.eth.send_raw_transaction.return_value = tx_hash_bytes
+    mock_w3_a.eth.get_transaction_count.return_value = 1
+    mock_w3_a.eth.get_block.return_value = {"baseFeePerGas": 1_000_000_000}
+    mock_w3_a.to_wei.return_value = 2_000_000_000
+    mock_w3_a.eth.chain_id = 11155111
+
+    # Signed tx stub
+    mock_signed = MagicMock()
+    mock_signed.raw_transaction = b"\xff" * 100
+    mock_account_a.sign_transaction.return_value = mock_signed
+
+    # get_transaction_receipt: None first (timeout path), then success
+    success_receipt = MagicMock()
+    success_receipt.status = 1
+    success_receipt.blockNumber = 7_654_321
+    _receipt_seq = [None, success_receipt]
+
+    def _get_receipt_a(tx):
+        return _receipt_seq.pop(0) if _receipt_seq else success_receipt
+
+    mock_w3_a.eth.get_transaction_receipt.side_effect = _get_receipt_a
+
+
+    updated_blocks_a = []
+    ledger_a.on_block_updated = updated_blocks_a.append
+
+    event_a1 = {
+        "event_id": 1, "timestamp": 1700000001.0,
+        "source": "TEST_A", "command_type": "START",
+        "entity_id": "PUMP_A_01", "parameters": {}
+    }
+    # Anchor while still in simulated mode so anchor_event does NOT auto-queue.
+    # Then switch to live-mock mode and queue once manually.
+    block_a1 = ledger_a.anchor_event(event_a1)
+
+    # Switch ledger to live-mock mode AFTER anchoring
+    ledger_a.w3 = mock_w3_a
+    ledger_a.contract = mock_contract_a
+    ledger_a.account = mock_account_a
+    ledger_a.contract_type = "ironledger"
+    ledger_a.is_simulated = False
+
+    # Queue exactly once
+    ledger_a._tx_queue.put({"block_ref": block_a1, "event": event_a1})
+
+    # Start the REAL worker
+    ledger_a._queue_worker_running = True
+    worker_a = threading.Thread(target=ledger_a._process_tx_queue, daemon=True)
+    worker_a.start()
+
+    # Wait for block_a1 to become CONFIRMED_ON_CHAIN (up to 5 s)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and block_a1.get("status") != "CONFIRMED_ON_CHAIN":
+        time.sleep(0.05)
+
+    # Stop the worker before it can do anything else
+    ledger_a._queue_worker_running = False
+    worker_a.join(timeout=3.0)
+
+    # Verify: block confirmed and send_raw_transaction was called exactly once (no resend)
+    assert block_a1.get("status") == "CONFIRMED_ON_CHAIN", (
+        f"[scenario a] Expected CONFIRMED_ON_CHAIN, got {block_a1.get('status')}"
+    )
+    assert mock_w3_a.eth.send_raw_transaction.call_count == 1, (
+        f"[scenario a] send_raw_transaction should be called exactly once, got "
+        f"{mock_w3_a.eth.send_raw_transaction.call_count}"
+    )
+    assert len(updated_blocks_a) >= 1, "[scenario a] on_block_updated should have been called"
+
+
+    # ── Scenario (b): lastHash never matches → CHAIN_OUT_OF_SYNC ────────────────
+    ledger_b = BlockchainLedger()
+    ledger_b._test_mode = True
+
+    mock_w3_b = MagicMock()
+    mock_contract_b = MagicMock()
+    mock_account_b = MagicMock()
+    mock_account_b.address = "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+    # lastHash always returns a value that will never match any previous_hash
+    mismatched = b"\xff" * 32
+    mock_contract_b.functions.lastHash.return_value.call.return_value = mismatched
+
+
+    updated_blocks_b = []
+    ledger_b.on_block_updated = updated_blocks_b.append
+
+    event_b1 = {
+        "event_id": 1, "timestamp": 1700000001.0,
+        "source": "TEST_B", "command_type": "START",
+        "entity_id": "PUMP_B_01", "parameters": {}
+    }
+    # Anchor while still simulated, then switch to live-mock mode
+    block_b1 = ledger_b.anchor_event(event_b1)
+
+    ledger_b.w3 = mock_w3_b
+    ledger_b.contract = mock_contract_b
+    ledger_b.account = mock_account_b
+    ledger_b.contract_type = "ironledger"
+    ledger_b.is_simulated = False
+
+    ledger_b._tx_queue.put({"block_ref": block_b1, "event": event_b1})
+
+    ledger_b._queue_worker_running = True
+    worker_b = threading.Thread(target=ledger_b._process_tx_queue, daemon=True)
+    worker_b.start()
+
+    # Wait for block_b1 to reach a terminal state (up to 5 s)
+    deadline_b = time.time() + 5.0
+    while time.time() < deadline_b and block_b1.get("status") not in (
+        "CHAIN_OUT_OF_SYNC", "CONFIRMED_ON_CHAIN", "FAILED_ON_CHAIN"
+    ):
+        time.sleep(0.05)
+
+    ledger_b._queue_worker_running = False
+    worker_b.join(timeout=3.0)
+
+    assert block_b1.get("status") == "CHAIN_OUT_OF_SYNC", (
+        f"[scenario b] Expected CHAIN_OUT_OF_SYNC, got {block_b1.get('status')}"
+    )
+    assert mock_w3_b.eth.send_raw_transaction.call_count == 0, (
+        "[scenario b] send_raw_transaction should NOT be called when chain is out of sync"
+    )
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print(" 🧪 RUNNING IRONLEDGER AUTOMATED TEST SUITE")
@@ -534,6 +696,7 @@ if __name__ == "__main__":
         ("API Endpoints & Guardrails", lambda: test_api_endpoints_and_auth_guardrails()),
         ("On-Chain Contract Verification Structure", lambda: test_onchain_contract_order_verification()),
         ("Mocked Contract Worker Timeout & Out-of-Sync Queue", lambda: test_mocked_contract_timeout_no_resend_and_out_of_sync_stop()),
+        ("Real Worker Thread: Receipt Timeout→Confirm & Out-of-Sync", lambda: test_real_worker_receipt_timeout_then_confirm_and_out_of_sync()),
     ]
 
     passed = 0

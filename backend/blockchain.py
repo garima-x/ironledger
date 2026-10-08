@@ -136,7 +136,7 @@ class BlockchainLedger:
             worker.start()
 
     def _process_tx_queue(self):
-        """Background worker loop broadcasting transactions to Sepolia with isolated pre-broadcast retries and receipt polling."""
+        """Background worker loop broadcasting transactions to Sepolia with reconciliation, pre-check retries, and receipt polling."""
         while self._queue_worker_running:
             try:
                 task = self._tx_queue.get(timeout=1.0)
@@ -148,30 +148,80 @@ class BlockchainLedger:
             event_hash = block_ref["event_hash"]
             prev_hash = block_ref["previous_hash"]
 
-            # Pre-send check: verify on-chain lastHash matches block's previous_hash
-            if self.contract and hasattr(self.contract.functions, "lastHash"):
+            # Reconcile step: check pending or out-of-sync blocks
+            curr_status = block_ref.get("status")
+            if curr_status == "PENDING_CONFIRMATION" and block_ref.get("tx_hash") and self.w3:
                 try:
-                    onchain_last_hash = self.contract.functions.lastHash().call()
-                    if isinstance(onchain_last_hash, bytes):
-                        onchain_last_str = "0x" + onchain_last_hash.hex().lower()
-                    else:
-                        onchain_last_str = str(onchain_last_hash).strip().lower()
-                        if not onchain_last_str.startswith("0x"):
-                            onchain_last_str = f"0x{onchain_last_str}"
+                    existing_tx = block_ref.get("tx_hash")
+                    tx_arg = bytes.fromhex(existing_tx[2:]) if isinstance(existing_tx, str) and existing_tx.startswith("0x") else existing_tx
+                    receipt = self.w3.eth.get_transaction_receipt(tx_arg)
+                    if receipt:
+                        receipt_status = getattr(receipt, "status", None)
+                        if receipt_status is None and isinstance(receipt, dict):
+                            receipt_status = receipt.get("status")
+                        if receipt_status == 1:
+                            block_ref["status"] = "CONFIRMED_ON_CHAIN"
+                            block_ref["block_number"] = getattr(receipt, "blockNumber", None) or (receipt.get("blockNumber") if isinstance(receipt, dict) else None)
+                            self._onchain_hashes_cache = None
+                            if self.on_block_updated:
+                                self.on_block_updated(block_ref)
+                            self._tx_queue.task_done()
+                            continue
+                        elif receipt_status == 0:
+                            block_ref["status"] = "REVERTED_ON_CHAIN"
+                            if self.on_block_updated:
+                                self.on_block_updated(block_ref)
+                            self._tx_queue.task_done()
+                            continue
+                except Exception as rec_err:
+                    print(f"⚠️ Reconciliation check failed for tx {block_ref.get('tx_hash')}: {rec_err}")
 
+            if curr_status == "CHAIN_OUT_OF_SYNC" and self.contract and hasattr(self.contract.functions, "lastHash"):
+                try:
+                    onchain_last = self.contract.functions.lastHash().call()
+                    onchain_last_str = ("0x" + onchain_last.hex().lower()) if isinstance(onchain_last, bytes) else str(onchain_last).strip().lower()
+                    if not onchain_last_str.startswith("0x"): onchain_last_str = f"0x{onchain_last_str}"
                     block_prev_str = str(prev_hash).strip().lower()
-                    if not block_prev_str.startswith("0x"):
-                        block_prev_str = f"0x{block_prev_str}"
+                    if not block_prev_str.startswith("0x"): block_prev_str = f"0x{block_prev_str}"
+                    if onchain_last_str == block_prev_str:
+                        block_ref["status"] = "QUEUED_ON_CHAIN"
+                except Exception:
+                    pass
 
-                    if onchain_last_str != block_prev_str:
-                        print(f"⚠️ Chain out of sync: on-chain lastHash ({onchain_last_str}) != block previous_hash ({block_prev_str}). Stopping queue processing.")
-                        block_ref["status"] = "CHAIN_OUT_OF_SYNC"
-                        if self.on_block_updated:
-                            self.on_block_updated(block_ref)
-                        self._tx_queue.task_done()
-                        continue
-                except Exception as sync_err:
-                    print(f"⚠️ Error checking on-chain lastHash: {sync_err}")
+            # Pre-send check: verify on-chain lastHash matches block's previous_hash (up to 5 tries, 3s apart)
+            if self.contract and hasattr(self.contract.functions, "lastHash"):
+                match = False
+                onchain_last_str = ""
+                block_prev_str = str(prev_hash).strip().lower()
+                if not block_prev_str.startswith("0x"):
+                    block_prev_str = f"0x{block_prev_str}"
+
+                for check_try in range(1, 6):
+                    try:
+                        onchain_last_hash = self.contract.functions.lastHash().call()
+                        if isinstance(onchain_last_hash, bytes):
+                            onchain_last_str = "0x" + onchain_last_hash.hex().lower()
+                        else:
+                            onchain_last_str = str(onchain_last_hash).strip().lower()
+                            if not onchain_last_str.startswith("0x"):
+                                onchain_last_str = f"0x{onchain_last_str}"
+
+                        if onchain_last_str == block_prev_str:
+                            match = True
+                            break
+                    except Exception as sync_err:
+                        print(f"⚠️ Error checking on-chain lastHash (try {check_try}/5): {sync_err}")
+
+                    if check_try < 5 and self._queue_worker_running:
+                        time.sleep(3.0 if not getattr(self, "_test_mode", False) else 0.01)
+
+                if not match:
+                    print(f"⚠️ Chain out of sync: on-chain lastHash ({onchain_last_str}) != block previous_hash ({block_prev_str}). Skipping block #{block_ref.get('block_index')}.")
+                    block_ref["status"] = "CHAIN_OUT_OF_SYNC"
+                    if self.on_block_updated:
+                        self.on_block_updated(block_ref)
+                    self._tx_queue.task_done()
+                    continue
 
             tx_sent = None
             tx_hash_hex = None
@@ -231,7 +281,6 @@ class BlockchainLedger:
 
                     block_ref["tx_hash"] = tx_hash_hex
                     block_ref["etherscan_url"] = f"https://sepolia.etherscan.io/tx/{tx_hash_hex}"
-                    block_ref["status"] = "PENDING_CONFIRMATION"
                     break
                 except Exception as exc:
                     print(f"⚠️ Pre-broadcast attempt {attempt}/{max_retries} failed for block #{block_ref.get('block_index')}: {exc}")
@@ -247,12 +296,20 @@ class BlockchainLedger:
                 self._tx_queue.task_done()
                 continue
 
-            # Phase 2: Post-broadcast receipt polling (NEVER re-broadcasts)
+            # Phase 2: Post-broadcast receipt polling (every 5s, up to 5 minutes / 300s before setting PENDING_CONFIRMATION)
             receipt = None
-            try:
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_sent, timeout=60)
-            except Exception as wait_err:
-                print(f"⚠️ Receipt wait timed out or failed for tx {tx_hash_hex} on block #{block_ref.get('block_index')}: {wait_err}")
+            poll_interval = 5.0 if not getattr(self, "_test_mode", False) else 0.01
+            poll_start = time.time()
+            poll_timeout = 300.0 if not getattr(self, "_test_mode", False) else 0.2
+
+            while (time.time() - poll_start) < poll_timeout and self._queue_worker_running:
+                try:
+                    receipt = self.w3.eth.get_transaction_receipt(tx_sent)
+                    if receipt is not None:
+                        break
+                except Exception:
+                    pass
+                time.sleep(poll_interval)
 
             if receipt:
                 receipt_status = getattr(receipt, "status", None)
@@ -270,7 +327,8 @@ class BlockchainLedger:
                 else:
                     block_ref["status"] = "REVERTED_ON_CHAIN"
             else:
-                # Receipt timed out: keep tx_hash attached, do NOT resend
+                # Receipt polling timed out (5 minutes): set PENDING_CONFIRMATION and leave tx_hash attached
+                print(f"⚠️ Receipt polling timeout (5m) for tx {tx_hash_hex} on block #{block_ref.get('block_index')}. Set to PENDING_CONFIRMATION.")
                 block_ref["status"] = "PENDING_CONFIRMATION"
 
             if self.on_block_updated:
