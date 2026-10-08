@@ -36,6 +36,16 @@ python3 backend/test_pipeline.py
 pytest backend/test_pipeline.py -v
 ```
 
+### 📜 Deploying the Smart Contract (Optional for Live Sepolia Mode)
+
+To deploy the [`contracts/IronLedger.sol`](contracts/IronLedger.sol) contract to Ethereum Sepolia testnet using Remix, Hardhat, or Foundry:
+
+1. **Constructor Argument:** Deploy `IronLedger.sol` with the `_genesisHash` argument:
+   `0x465d14d810bcba66615818b4ac0a1e63ba763dfcc86a1c02c584c4c5af213723`
+   *(This matches the deterministic `GENESIS_HASH` defined in [`backend/blockchain.py`](backend/blockchain.py)).*
+2. **Environment Configuration:** Set `CONTRACT_TYPE=ironledger` and update `SEPOLIA_CONTRACT_ADDRESS=0xYOUR_NEW_ADDRESS` in `.env`.
+3. **Database Reset & Re-deployment:** If you run `python3 reset_db.py` to wipe stored events/blocks and restart the genesis chain, the smart contract **must be redeployed** and `SEPOLIA_CONTRACT_ADDRESS` updated in `.env` so on-chain `lastHash` linkage remains synchronized with the fresh genesis root.
+
 ---
 
 ## 🏗️ Architecture & Modules

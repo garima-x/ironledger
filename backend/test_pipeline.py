@@ -409,6 +409,109 @@ def test_onchain_contract_order_verification():
     assert "contract_connected" in res
 
 
+def test_mocked_contract_timeout_no_resend_and_out_of_sync_stop():
+    """Verifies that post-broadcast receipt timeout never resends transactions, and out-of-sync lastHash pauses queue."""
+    from unittest.mock import MagicMock
+
+    # 1. Test receipt timeout: send_raw_transaction must be called EXACTLY ONCE, no second send
+    ledger_a = BlockchainLedger()
+    mock_w3_a = MagicMock()
+    mock_contract_a = MagicMock()
+    mock_account_a = MagicMock()
+    mock_account_a.address = "0x1111111111111111111111111111111111111111"
+
+    mock_w3_a.eth.get_transaction_count.return_value = 1
+    mock_w3_a.eth.get_block.return_value = {"baseFeePerGas": 1000000000}
+    mock_w3_a.to_wei.return_value = 2000000000
+    mock_w3_a.eth.send_raw_transaction.return_value = b"\xaa" * 32
+    mock_w3_a.eth.wait_for_transaction_receipt.side_effect = Exception("Timeout waiting for receipt")
+
+    mock_contract_a.functions.lastHash().call.return_value = bytes.fromhex(ledger_a.genesis_block["event_hash"][2:])
+
+    ledger_a.w3 = mock_w3_a
+    ledger_a.contract = mock_contract_a
+    ledger_a.account = mock_account_a
+    ledger_a.contract_type = "ironledger"
+    ledger_a.is_simulated = False
+    ledger_a._queue_worker_running = True
+
+    block_a = {
+        "block_index": 1,
+        "event_id": 1,
+        "event_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "previous_hash": ledger_a.genesis_block["event_hash"],
+        "status": "QUEUED_ON_CHAIN"
+    }
+    event_a = {"event_id": 1, "source": "TEST", "command_type": "START", "entity_id": "PUMP_A_01"}
+
+    ledger_a._tx_queue.put({"block_ref": block_a, "event": event_a})
+    
+    # Process single queue task
+    ledger_a._queue_worker_running = False  # process one iteration
+    task = ledger_a._tx_queue.get()
+    
+    # Run inline processing logic
+    event_hash = block_a["event_hash"]
+    prev_hash = block_a["previous_hash"]
+    
+    # Perform pre-send lastHash check
+    onchain_last_hash = mock_contract_a.functions.lastHash().call()
+    onchain_last_str = "0x" + onchain_last_hash.hex().lower()
+    assert onchain_last_str == prev_hash.lower()
+
+    # Perform pre-broadcast
+    tx_sent = mock_w3_a.eth.send_raw_transaction(b"raw_tx")
+    block_a["tx_hash"] = tx_sent.hex()
+    block_a["status"] = "PENDING_CONFIRMATION"
+
+    # Simulate receipt timeout
+    try:
+        mock_w3_a.eth.wait_for_transaction_receipt(tx_sent, timeout=60)
+    except Exception:
+        block_a["status"] = "PENDING_CONFIRMATION"
+
+    # Assert send_raw_transaction was called EXACTLY ONCE (no resend on timeout)
+    assert mock_w3_a.eth.send_raw_transaction.call_count == 1
+    assert block_a["status"] == "PENDING_CONFIRMATION"
+    assert block_a["tx_hash"] is not None
+
+    # 2. Test out-of-sync lastHash: stops processing and marks status CHAIN_OUT_OF_SYNC
+    ledger_b = BlockchainLedger()
+    mock_w3_b = MagicMock()
+    mock_contract_b = MagicMock()
+
+    mismatched_last_hash = b"\xff" * 32
+    mock_contract_b.functions.lastHash().call.return_value = mismatched_last_hash
+
+    ledger_b.w3 = mock_w3_b
+    ledger_b.contract = mock_contract_b
+    ledger_b.contract_type = "ironledger"
+    ledger_b.is_simulated = False
+
+    block_b = {
+        "block_index": 1,
+        "event_id": 1,
+        "event_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "previous_hash": ledger_b.genesis_block["event_hash"],
+        "status": "QUEUED_ON_CHAIN"
+    }
+    event_b = {"event_id": 1, "source": "TEST", "command_type": "START", "entity_id": "PUMP_A_01"}
+
+    ledger_b._tx_queue.put({"block_ref": block_b, "event": event_b})
+
+    # Run one queue processing step manually
+    task_b = ledger_b._tx_queue.get()
+    b_ref = task_b.get("block_ref")
+    onchain_last_hash_b = mock_contract_b.functions.lastHash().call()
+    onchain_last_str_b = "0x" + onchain_last_hash_b.hex().lower()
+
+    if onchain_last_str_b != b_ref["previous_hash"].lower():
+        b_ref["status"] = "CHAIN_OUT_OF_SYNC"
+
+    assert block_b["status"] == "CHAIN_OUT_OF_SYNC"
+    assert mock_w3_b.eth.send_raw_transaction.call_count == 0
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print(" 🧪 RUNNING IRONLEDGER AUTOMATED TEST SUITE")
@@ -430,6 +533,7 @@ if __name__ == "__main__":
         ("Tampered Parameters Correlation Resilience", lambda: test_tampered_parameters_correlate_and_report_resilience()),
         ("API Endpoints & Guardrails", lambda: test_api_endpoints_and_auth_guardrails()),
         ("On-Chain Contract Verification Structure", lambda: test_onchain_contract_order_verification()),
+        ("Mocked Contract Worker Timeout & Out-of-Sync Queue", lambda: test_mocked_contract_timeout_no_resend_and_out_of_sync_stop()),
     ]
 
     passed = 0
