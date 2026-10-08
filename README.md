@@ -65,7 +65,7 @@ pytest backend/test_pipeline.py -v
    - Signature coverage scoring against threat actor profiles (Xenotime, Sandworm, Equation Group, Volt Typhoon) with forensic attribution caveats.
 
 5. **Court-Ready Report Generator ([`backend/report_generator.py`](backend/report_generator.py))**:
-   - Generates compliant, printable HTML/PDF forensic reports meeting Federal Rules of Evidence 902(13) & 902(14) chain-of-custody standards.
+   - Generates structured HTML forensic reports designed to assist with Federal Rules of Evidence 902(13) & 902(14) digital records authentication requirements, complete with investigator certification sign-off blocks.
 
 ---
 

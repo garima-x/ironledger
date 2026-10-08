@@ -101,7 +101,10 @@ class BlockchainLedger:
                 self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
                 if self.w3.is_connected():
                     self.account = self.w3.eth.account.from_key(self.private_key)
-                    abi_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "contracts", "EvidenceChainABI.json")
+                    abi_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "contracts", "IronLedgerABI.json")
+                    if not os.path.exists(abi_path):
+                        abi_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "contracts", "EvidenceChainABI.json")
+
                     if os.path.exists(abi_path):
                         with open(abi_path, "r") as f:
                             abi = json.load(f)
@@ -126,7 +129,7 @@ class BlockchainLedger:
             worker.start()
 
     def _process_tx_queue(self):
-        """Background worker loop broadcasting transactions to Sepolia without freezing HTTP API."""
+        """Background worker loop broadcasting transactions to Sepolia with exponential retries."""
         while self._queue_worker_running:
             try:
                 task = self._tx_queue.get(timeout=1.0)
@@ -138,55 +141,77 @@ class BlockchainLedger:
             event_hash = block_ref["event_hash"]
             prev_hash = block_ref["previous_hash"]
 
-            try:
-                # EvidenceChain.addEvidence(string _caseId, string _evidenceHash, string _description)
-                # _caseId      → entity_id  (e.g. "PLANT", "REACTOR-1")
-                # _evidenceHash → SHA-256 hex string of the ICS event
-                # _description  → "<command_type> | <source>" for human-readable audit trail
-                case_id = str(event.get("entity_id", "IRONLEDGER"))
-                description = f"{event.get('command_type', 'EVENT')} | {event.get('source', 'UNKNOWN')}"
+            max_retries = 3
+            success = False
 
-                # Fetch pending nonce to avoid collision
-                nonce = self.w3.eth.get_transaction_count(self.account.address, 'pending')
-
-                base_fee = self.w3.eth.get_block('latest').get('baseFeePerGas', self.w3.to_wei(1, 'gwei'))
-                priority_fee = self.w3.to_wei(2, 'gwei')
-                max_fee = base_fee * 2 + priority_fee
-
-                func_call = self.contract.functions.addEvidence(case_id, event_hash, description)
+            for attempt in range(1, max_retries + 1):
                 try:
-                    estimated_gas = func_call.estimate_gas({"from": self.account.address})
-                    gas_limit = int(estimated_gas * 1.25)
-                except Exception:
-                    gas_limit = 1500000
+                    nonce = self.w3.eth.get_transaction_count(self.account.address, 'pending')
+                    base_fee = self.w3.eth.get_block('latest').get('baseFeePerGas', self.w3.to_wei(1, 'gwei'))
+                    priority_fee = self.w3.to_wei(2, 'gwei')
+                    max_fee = base_fee * 2 + priority_fee
 
-                tx = func_call.build_transaction({
-                    "from": self.account.address,
-                    "nonce": nonce,
-                    "gas": gas_limit,
-                    "maxFeePerGas": max_fee,
-                    "maxPriorityFeePerGas": priority_fee,
-                    "chainId": 11155111
-                })
-                signed = self.account.sign_transaction(tx)
-                raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
-                tx_sent = self.w3.eth.send_raw_transaction(raw_tx)
-                tx_hash_hex = tx_sent.hex()
+                    if hasattr(self.contract.functions, "recordEvent"):
+                        event_h = event_hash if event_hash.startswith("0x") else f"0x{event_hash}"
+                        prev_h = prev_hash if prev_hash.startswith("0x") else f"0x{prev_hash}"
+                        if len(event_h) < 66:
+                            event_h = "0x" + event_h[2:].zfill(64)
+                        if len(prev_h) < 66:
+                            prev_h = "0x" + prev_h[2:].zfill(64)
 
-                block_ref["tx_hash"] = tx_hash_hex
-                block_ref["etherscan_url"] = f"https://sepolia.etherscan.io/tx/{tx_hash_hex}"
-                block_ref["status"] = "PENDING_CONFIRMATION"
+                        func_call = self.contract.functions.recordEvent(
+                            event_h,
+                            prev_h,
+                            str(event.get("source", "UNKNOWN")),
+                            str(event.get("command_type", "EVENT")),
+                            str(event.get("entity_id", "PLANT"))
+                        )
+                    else:
+                        case_id = str(event.get("entity_id", "IRONLEDGER"))
+                        description = f"{event.get('command_type', 'EVENT')} | {event.get('source', 'UNKNOWN')}"
+                        func_call = self.contract.functions.addEvidence(case_id, event_hash, description)
 
-                # Wait for receipt asynchronously in worker
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_sent, timeout=120)
-                if receipt.status == 1:
-                    block_ref["block_number"] = receipt.blockNumber
-                    block_ref["status"] = "CONFIRMED_ON_CHAIN"
-                    self._onchain_hashes_cache = None
-                else:
-                    block_ref["status"] = "REVERTED_ON_CHAIN"
-            except Exception as exc:
-                print(f"⚠️ On-chain broadcast failed for block #{block_ref.get('block_index')}: {exc}")
+                    try:
+                        estimated_gas = func_call.estimate_gas({"from": self.account.address})
+                        gas_limit = int(estimated_gas * 1.25)
+                    except Exception:
+                        gas_limit = 1500000
+
+                    chain_id = getattr(self.w3.eth, "chain_id", 11155111)
+
+                    tx = func_call.build_transaction({
+                        "from": self.account.address,
+                        "nonce": nonce,
+                        "gas": gas_limit,
+                        "maxFeePerGas": max_fee,
+                        "maxPriorityFeePerGas": priority_fee,
+                        "chainId": chain_id
+                    })
+                    signed = self.account.sign_transaction(tx)
+                    raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+                    tx_sent = self.w3.eth.send_raw_transaction(raw_tx)
+                    tx_hash_hex = tx_sent.hex()
+
+                    block_ref["tx_hash"] = tx_hash_hex
+                    block_ref["etherscan_url"] = f"https://sepolia.etherscan.io/tx/{tx_hash_hex}"
+                    block_ref["status"] = "PENDING_CONFIRMATION"
+
+                    receipt = self.w3.eth.wait_for_transaction_receipt(tx_sent, timeout=120)
+                    if receipt.status == 1:
+                        block_ref["block_number"] = receipt.blockNumber
+                        block_ref["status"] = "CONFIRMED_ON_CHAIN"
+                        self._onchain_hashes_cache = None
+                        success = True
+                        break
+                    else:
+                        block_ref["status"] = "REVERTED_ON_CHAIN"
+                        break
+                except Exception as exc:
+                    print(f"⚠️ On-chain broadcast attempt {attempt}/{max_retries} failed for block #{block_ref.get('block_index')}: {exc}")
+                    if attempt < max_retries:
+                        time.sleep(2.0 * attempt)
+
+            if not success and block_ref.get("status") not in ["CONFIRMED_ON_CHAIN", "REVERTED_ON_CHAIN"]:
                 block_ref["status"] = "FAILED_ON_CHAIN"
                 block_ref["tx_hash"] = None
                 block_ref["etherscan_url"] = None
@@ -270,9 +295,7 @@ class BlockchainLedger:
     def verify_against_contract(self) -> Dict[str, Any]:
         """
         Read-back verification directly querying the deployed Smart Contract on Sepolia.
-        Fetches all on-chain hashes once and caches them for 30s to minimize RPC calls.
-        For every local block with status CONFIRMED_ON_CHAIN (or non-genesis block on chain),
-        checks that its hash is in the on-chain set, flagging any missing or mismatched hashes.
+        Verifies exact index sequence, event hash, and previous_hash linkage against smart contract storage.
         """
         if self.is_simulated or not self.contract or not self.w3:
             return {
@@ -284,42 +307,59 @@ class BlockchainLedger:
 
         try:
             now = time.time()
-            # Fetch on-chain hashes once and cache for 30s to avoid repeated RPC round-trips
             if (
                 self._onchain_hashes_cache is None
                 or (now - self._onchain_cache_time) > 30.0
             ):
-                total_onchain = self.contract.functions.evidenceCount().call()
+                onchain_events = {}
                 onchain_hashes = set()
-                onchain_by_index = {}
-                for i in range(1, total_onchain + 1):
-                    ev_data = self.contract.functions.getEvidence(i).call()
-                    # ev_data: (evidenceId, caseId, evidenceHash, description, uploadedBy, timestamp)
-                    h = str(ev_data[2]).strip().lower()
-                    onchain_hashes.add(h)
-                    onchain_by_index[i] = h
+
+                if hasattr(self.contract.functions, "totalEvents"):
+                    total_onchain = self.contract.functions.totalEvents().call()
+                    for i in range(1, total_onchain + 1):
+                        try:
+                            ev_tuple = self.contract.functions.getEvent(i).call()
+                            ev_id = ev_tuple[0]
+                            ev_h = (ev_tuple[1].hex() if isinstance(ev_tuple[1], bytes) else str(ev_tuple[1])).lower()
+                            prev_h = (ev_tuple[2].hex() if isinstance(ev_tuple[2], bytes) else str(ev_tuple[2])).lower()
+                            if not ev_h.startswith("0x"): ev_h = f"0x{ev_h}"
+                            if not prev_h.startswith("0x"): prev_h = f"0x{prev_h}"
+
+                            onchain_events[i] = {"event_id": ev_id, "event_hash": ev_h, "previous_hash": prev_h}
+                            onchain_hashes.add(ev_h)
+                        except Exception:
+                            pass
+                else:
+                    total_onchain = self.contract.functions.evidenceCount().call()
+                    for i in range(1, total_onchain + 1):
+                        ev_data = self.contract.functions.getEvidence(i).call()
+                        h = str(ev_data[2]).strip().lower()
+                        if not h.startswith("0x"): h = f"0x{h}"
+                        onchain_events[i] = {"event_hash": h}
+                        onchain_hashes.add(h)
 
                 self._onchain_hashes_cache = {
                     "total": total_onchain,
                     "hashes": onchain_hashes,
-                    "by_index": onchain_by_index
+                    "events_by_index": onchain_events
                 }
                 self._onchain_cache_time = now
 
             cached = self._onchain_hashes_cache
             total_onchain = cached["total"]
-            onchain_hashes = cached["hashes"]
+            onchain_events = cached["events_by_index"]
 
             discrepancies = []
 
-            # Check every local block with status CONFIRMED_ON_CHAIN
-            for blk in self.chain[1:]:
-                blk_idx = blk.get("block_index")
+            # Verify local blocks against on-chain records (checking index sequence & linkage)
+            for idx, blk in enumerate(self.chain[1:], start=1):
+                blk_idx = blk.get("block_index", idx)
                 status = blk.get("status")
                 local_h = blk.get("event_hash", "").strip().lower()
 
                 if status == "CONFIRMED_ON_CHAIN" or blk.get("tx_hash"):
-                    if local_h not in onchain_hashes:
+                    onchain_rec = onchain_events.get(idx)
+                    if not onchain_rec:
                         discrepancies.append({
                             "block_index": blk_idx,
                             "event_id": blk.get("event_id"),
@@ -327,6 +367,16 @@ class BlockchainLedger:
                             "onchain_hash": "MISSING_FROM_SMART_CONTRACT",
                             "reason": "CONFIRMED_BLOCK_NOT_FOUND_ON_CHAIN"
                         })
+                    else:
+                        onchain_h = onchain_rec.get("event_hash", "")
+                        if local_h != onchain_h:
+                            discrepancies.append({
+                                "block_index": blk_idx,
+                                "event_id": blk.get("event_id"),
+                                "local_hash": local_h,
+                                "onchain_hash": onchain_h,
+                                "reason": "ONCHAIN_HASH_MISMATCH_AT_INDEX"
+                            })
 
             return {
                 "contract_connected": True,

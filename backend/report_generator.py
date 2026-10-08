@@ -477,6 +477,19 @@ class ForensicReportGenerator:
             </div>
         </div>
 
+        <h2>5. Digital Forensics Certification & Chain of Custody Sign-Off</h2>
+        <div class="info-card" style="margin-bottom: 25px;">
+            <div class="label">FRE 902(13) & 902(14) Authentication Support Statement</div>
+            <p style="font-size: 13px; color: var(--text-main); margin: 10px 0;">
+                This document is designed to assist forensic investigators with Federal Rules of Evidence (FRE) 902(13) & 902(14) digital records authentication requirements. Cryptographic hash chains, smart contract verification logs, and telemetry snapshots provide verifiable evidence of data integrity. Final legal certification requires a qualified forensic analyst's review and sign-off.
+            </p>
+            <div style="display: flex; justify-content: space-between; margin-top: 20px; padding-top: 15px; border-top: 1px dashed #334155; font-size: 12px; color: var(--text-muted);">
+                <div><strong>Certified By:</strong> ___________________________</div>
+                <div><strong>Title / Organization:</strong> ___________________________</div>
+                <div><strong>Date:</strong> _______________</div>
+            </div>
+        </div>
+
         <div class="footer">
             <div>Framework: <strong>IronLedger Digital Forensics</strong></div>
             <div>Investigating Officers: <strong>Simran & Garima</strong> | IronLedger Core</div>

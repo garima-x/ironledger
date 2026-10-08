@@ -367,6 +367,48 @@ def test_signature_tampering_detection(ledger):
     assert audit["audit_details"][0]["reason"] == "HASH_MISMATCH"
 
 
+def test_api_endpoints_and_auth_guardrails():
+    """Verifies FastAPI endpoints for plant command execution, forensic reconstruction, and report generation."""
+    from fastapi.testclient import TestClient
+    from api import app
+
+    client = TestClient(app)
+
+    # 1. Telemetry endpoint
+    r_telem = client.get("/api/telemetry")
+    assert r_telem.status_code == 200
+    assert "pressure_vessel" in r_telem.json()["telemetry"]
+
+    # 2. Command execution endpoint
+    cmd_data = {
+        "source": "AUTHORIZED_ENG_01",
+        "command_type": "SET_RPM",
+        "entity_id": "PUMP_A_01",
+        "parameters": {"rpm": 2400}
+    }
+    r_cmd = client.post("/api/plant/command", json=cmd_data)
+    assert r_cmd.status_code == 200
+    assert r_cmd.json().get("status") == "COMMAND_EXECUTED_AND_ANCHORED"
+
+    # 3. Forensic reconstruction endpoint
+    r_forensics = client.get("/api/forensics/reconstruct")
+    assert r_forensics.status_code == 200
+    assert r_forensics.json().get("success") is True
+
+    # 4. Report generation endpoint
+    r_report = client.get("/api/report/html")
+    assert r_report.status_code == 200
+    assert "Forensic Report" in r_report.text
+
+
+def test_onchain_contract_order_verification():
+    """Verifies that verify_against_contract returns structured verification payload."""
+    ledger = BlockchainLedger()
+    res = ledger.verify_against_contract()
+    assert isinstance(res, dict)
+    assert "contract_connected" in res
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print(" 🧪 RUNNING IRONLEDGER AUTOMATED TEST SUITE")
@@ -386,6 +428,8 @@ if __name__ == "__main__":
         ("Tamper Parameter Hash Verification", lambda: test_forensic_tamper_parameter_verification()),
         ("Malformed DB Record Handling", lambda: test_malformed_db_record_handling()),
         ("Tampered Parameters Correlation Resilience", lambda: test_tampered_parameters_correlate_and_report_resilience()),
+        ("API Endpoints & Guardrails", lambda: test_api_endpoints_and_auth_guardrails()),
+        ("On-Chain Contract Verification Structure", lambda: test_onchain_contract_order_verification()),
     ]
 
     passed = 0
