@@ -9,6 +9,7 @@ import time
 import os
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Body, Query, Depends
@@ -17,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, model_validator
 
 from backend.simulator import ICSSimulator
-from backend.blockchain import BlockchainLedger
+from backend.blockchain import BlockchainLedger, GENESIS_HASH
 from backend.anomaly_detector import AnomalyDetector
 from backend.forensics import ForensicReconstructionEngine
 from backend.threat_intel import ThreatIntelligenceEngine
@@ -197,6 +198,15 @@ class TamperRequest(BaseModel):
     malicious_field: str
     tampered_value: Any
 
+class AnchorReceipt(BaseModel):
+    """Receipt reported by the browser after MetaMask signed + confirmed a recordEvent tx."""
+    block_index: int
+    event_hash: str
+    tx_hash: str
+    block_number: Optional[int] = None
+    recorded_by: Optional[str] = None
+    contract_address: Optional[str] = None
+
 class SaveCaseRequest(BaseModel):
     case_name: Optional[str] = None
 
@@ -224,6 +234,54 @@ async def get_telemetry():
         "blockchain_mode": "LIVE_ETHEREUM_SEPOLIA" if not ledger.is_simulated else "SIMULATED_LOCAL_LEDGER",
         "demo_mode": DEMO_MODE
     }
+
+# ── MetaMask (browser-signed) anchoring support ──────────────────────────────
+
+_TX_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+@app.get("/api/config")
+async def get_config():
+    """Public config the dashboard needs to anchor hashes from MetaMask."""
+    return {
+        "genesis_hash": GENESIS_HASH,
+        "contract_address": os.environ.get("SEPOLIA_CONTRACT_ADDRESS", "").strip(),
+        "chain_id": 11155111,
+        "network": "sepolia",
+        "demo_mode": DEMO_MODE,
+    }
+
+@app.get("/api/chain")
+async def get_full_chain():
+    """Returns the full local hash chain (oldest first) so the browser can anchor every block."""
+    return {"genesis_hash": GENESIS_HASH, "blocks": list(ledger.chain)}
+
+@app.post("/api/chain/anchor")
+async def record_anchor_receipt(req: AnchorReceipt):
+    """Marks a local block as anchored on-chain after the browser confirmed the MetaMask transaction."""
+    if not _TX_RE.match(req.tx_hash):
+        raise HTTPException(status_code=422, detail="tx_hash must be a 0x-prefixed 32-byte hex string.")
+    if req.recorded_by and not _ADDR_RE.match(req.recorded_by):
+        raise HTTPException(status_code=422, detail="recorded_by must be a 0x-prefixed address.")
+    if req.block_index <= 0 or req.block_index >= len(ledger.chain):
+        raise HTTPException(status_code=404, detail=f"Block {req.block_index} not found.")
+    block = ledger.chain[req.block_index]
+    if str(block.get("event_hash", "")).lower() != req.event_hash.lower():
+        raise HTTPException(status_code=409, detail="event_hash does not match the local block at that index.")
+
+    block["tx_hash"] = req.tx_hash
+    block["block_number"] = req.block_number
+    block["status"] = "CONFIRMED_ON_CHAIN"
+    block["is_simulated"] = False
+    block["etherscan_url"] = f"https://sepolia.etherscan.io/tx/{req.tx_hash}"
+    if req.recorded_by:
+        block["recorded_by"] = req.recorded_by
+    if req.contract_address:
+        block["contract_address"] = req.contract_address
+    if db.enabled:
+        await asyncio.to_thread(db.upsert_block, block)
+    return {"status": "ANCHOR_RECORDED", "block": block}
+
 
 @app.post("/api/plant/command")
 async def send_command(cmd: CommandRequest):

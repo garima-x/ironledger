@@ -8,7 +8,7 @@ let state = {
     pollingInterval: null,
     lastSnapshot: null,
     isTamperedDemo: false,
-    walletConnected: true,
+    walletConnected: false,
     activeScenario: null
 };
 
@@ -39,6 +39,7 @@ async function updateDashboard() {
         renderAnomalyEngine(data.anomaly);
         renderRecentBlocks(data.recent_blocks);
         updateDbStatusBadge(data.db_connected);
+        if (window.IronWallet) window.IronWallet.onTelemetry(data);
     } catch (err) {
         console.warn("Telemetry polling error:", err);
     }
@@ -233,8 +234,13 @@ function renderRecentBlocks(blocks) {
 
     tbody.innerHTML = blocks.map(b => {
         const hashDisplay = b.event_hash ? `${b.event_hash.slice(0, 10)}...${b.event_hash.slice(-6)}` : "N/A";
-        const txDisplay = b.tx_hash ? `${b.tx_hash.slice(0, 8)}...` : "Confirmed";
         const dateStr = new Date(b.timestamp * 1000).toLocaleTimeString();
+        const onChain = b.status === "CONFIRMED_ON_CHAIN" || !!b.tx_hash;
+        const isGenesis = b.block_index === 0;
+        const chipText = isGenesis ? "GENESIS" : (onChain ? "ON-CHAIN ✓" : "ANCHORED (local)");
+        const hashEl = b.etherscan_url
+            ? `<a href="${esc(b.etherscan_url)}" target="_blank" rel="noopener" class="hash-link" title="${esc(b.event_hash || "")}">${esc(hashDisplay)}</a>`
+            : `<span class="hash-link" title="${esc(b.event_hash || "")}">${esc(hashDisplay)}</span>`;
 
         return `
         <tr id="block-row-${b.block_index}">
@@ -243,8 +249,8 @@ function renderRecentBlocks(blocks) {
             <td>${dateStr}</td>
             <td><code>${esc(b.command_type || "")}</code></td>
             <td><span style="color:#94a3b8">${esc(b.source || "")}</span></td>
-            <td><a href="${b.etherscan_url || '#'}" target="_blank" class="hash-link" title="${esc(b.event_hash || "")}">${esc(hashDisplay)}</a></td>
-            <td><span class="status-chip anchored">ANCHORED</span></td>
+            <td>${hashEl}</td>
+            <td><span class="status-chip anchored">${chipText}</span></td>
         </tr>
         `;
     }).join("");
@@ -444,12 +450,10 @@ function openReportInNewTab() {
 }
 
 function toggleMetaMask() {
-    state.walletConnected = !state.walletConnected;
-    const btnText = document.getElementById("wallet-text");
-    if (state.walletConnected) {
-        btnText.textContent = "MetaMask: Connected (Sepolia)";
+    if (window.IronWallet) {
+        window.IronWallet.toggle();
     } else {
-        btnText.textContent = "Connect MetaMask";
+        alert("Wallet module failed to load — reload the page.");
     }
 }
 

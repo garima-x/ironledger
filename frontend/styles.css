@@ -1807,3 +1807,21 @@ code, .font-mono, th, td, .hash-col, .ml-score-container, .metric-card .val {
     border-top: 1px solid #1e2942;
     line-height: 1.5;
 }
+
+/* ── MetaMask anchoring banner ─────────────────────────────────────────── */
+.wallet-banner {
+    margin: 0 24px 12px;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.5;
+    border: 1px solid rgba(59, 130, 246, 0.4);
+    background: rgba(59, 130, 246, 0.12);
+    color: #93c5fd;
+}
+.wallet-banner.ok    { border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.12); color: #6ee7b7; }
+.wallet-banner.warn  { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #fcd34d; }
+.wallet-banner.error { border-color: rgba(239, 68, 68, 0.5);   background: rgba(239, 68, 68, 0.14);  color: #fca5a5; }
+.wallet-banner code  { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+.wallet-banner a     { color: inherit; text-decoration: underline; }
+.wallet-banner.hidden { display: none; }
