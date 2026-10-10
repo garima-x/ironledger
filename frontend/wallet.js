@@ -152,8 +152,11 @@
     async function resolveContractAddress() {
         const cfg = await getConfig();
         let addr = (cfg.contract_address || "").trim();
+        // Ignore placeholder / invalid values (e.g. "0xYOUR_CONTRACT_ADDRESS" copied from .env.example)
+        if (addr && !ethers.isAddress(addr)) addr = "";
         if (!addr) {
             try { addr = (localStorage.getItem(STORAGE_KEY) || "").trim(); } catch (e) { /* ignore */ }
+            if (addr && !ethers.isAddress(addr)) addr = "";
         }
         if (!addr) {
             addr = (window.prompt(
